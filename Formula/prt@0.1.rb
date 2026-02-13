@@ -1,8 +1,8 @@
 class PrtAT01 < Formula
   desc "Open GitHub pull requests in isolated git worktrees"
   homepage "https://github.com/BradyPlanden/prt"
-  url "https://github.com/BradyPlanden/prt/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5"
+  url "https://github.com/BradyPlanden/prt/archive/refs/tags/v0.1.1.tar.gz"
+  sha256 "4db2e61f19fa4d82361b3b08278d146e822d5a23416b2f1571e8ad66305d0457"
   license "MIT"
 
   keg_only :versioned_formula
