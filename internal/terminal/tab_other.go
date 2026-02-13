@@ -7,6 +7,7 @@ import (
 	"os"
 )
 
+// Detect returns a fallback opener on non-macOS systems.
 func Detect(cfg Config) (TabOpener, error) {
 	term := normalizeTerminal(cfg.Terminal)
 	if term == "auto" {

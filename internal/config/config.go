@@ -19,6 +19,7 @@ const (
 	defaultConfigPath  = "~/.config/prt/config.yaml"
 )
 
+// Config stores runtime settings for repository and terminal behavior.
 type Config struct {
 	ProjectsDir string
 	TempDir     string
@@ -27,6 +28,7 @@ type Config struct {
 	Verbose     bool
 }
 
+// Overrides contains CLI-supplied values that override file and env config.
 type Overrides struct {
 	ProjectsDir string
 	TempDir     string
@@ -43,6 +45,7 @@ type fileConfig struct {
 	Terminal    string `yaml:"terminal"`
 }
 
+// Load reads configuration from disk, environment, and explicit overrides.
 func Load(overrides Overrides) (Config, error) {
 	cfg := Config{
 		ProjectsDir: defaultProjectsDir,

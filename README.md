@@ -20,7 +20,9 @@ go install github.com/BradyPlanden/prt/cmd/prt@latest
 prt https://github.com/OWNER/REPO/pull/123
 prt https://github.com/OWNER/REPO/pull/123 --temp
 prt https://github.com/OWNER/REPO/pull/123 --no-tab
+prt https://github.com/OWNER/REPO/pull/123 --terminal iterm2
 prt clean --dry-run
+prt clean --all
 ```
 
 ## Config
@@ -33,6 +35,23 @@ temp_dir: /tmp/prt
 temp_ttl: 24h
 terminal: auto # auto | iterm2 | terminal
 ```
+
+Configuration precedence (lowest to highest): config file, environment variables, CLI flags.
+
+Notes:
+
+- `PRT_TEMP_TTL` with an invalid duration is ignored; `temp_ttl` in config and `--temp-ttl` fail with an error when invalid.
+- `PRT_VERBOSE` accepts `1`, `true`, `yes`, or `on`.
+
+## URL host support
+
+- `prt` accepts PR URLs from `github.com` and `*.github.com` hosts.
+
+## Terminal behavior
+
+- On macOS, `terminal: auto` detects from `TERM_PROGRAM` and opens a new tab only when launched from iTerm2 (`iTerm.app`) or Terminal.app (`Apple_Terminal`).
+- If auto detection cannot identify either app, `prt` prints the resolved path instead.
+- Use `--terminal` or `PRT_TERMINAL` to force `iterm2` or `terminal` when needed.
 
 ## Automatic worktree setup
 

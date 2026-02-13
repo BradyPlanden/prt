@@ -12,19 +12,23 @@ import (
 // branch already exists (e.g. stale leftover after manual worktree removal).
 var ErrBranchExists = errors.New("branch already exists")
 
+// Runner executes git commands in a working directory.
 type Runner interface {
 	Run(ctx context.Context, dir string, name string, args ...string) (string, error)
 }
 
+// ExecRunner runs commands via os/exec and optionally logs them.
 type ExecRunner struct {
 	Verbose bool
 	Logger  Logger
 }
 
+// Logger provides lightweight structured logging hooks.
 type Logger interface {
 	Printf(format string, args ...any)
 }
 
+// Run executes a command and returns trimmed combined output.
 func (r ExecRunner) Run(ctx context.Context, dir string, name string, args ...string) (string, error) {
 	if r.Verbose && r.Logger != nil {
 		r.Logger.Printf("+ %s %s", name, strings.Join(args, " "))
@@ -42,16 +46,19 @@ func (r ExecRunner) Run(ctx context.Context, dir string, name string, args ...st
 	return strings.TrimSpace(string(output)), nil
 }
 
+// Client wraps git command operations used by workspace resolution.
 type Client struct {
 	runner Runner
 }
 
+// ClientOptions configures a git client.
 type ClientOptions struct {
 	Verbose bool
 	Logger  Logger
 	Runner  Runner
 }
 
+// NewClient constructs a Client using ExecRunner when no Runner is provided.
 func NewClient(opts ClientOptions) *Client {
 	runner := opts.Runner
 	if runner == nil {
@@ -60,6 +67,7 @@ func NewClient(opts ClientOptions) *Client {
 	return &Client{runner: runner}
 }
 
+// IsGitRepo reports whether repoDir is a valid git repository.
 func (c *Client) IsGitRepo(ctx context.Context, repoDir string) (bool, error) {
 	output, err := c.runner.Run(ctx, repoDir, "git", "rev-parse", "--git-dir")
 	if err != nil {
@@ -74,6 +82,7 @@ func (c *Client) IsGitRepo(ctx context.Context, repoDir string) (bool, error) {
 	return output != "", nil
 }
 
+// Clone clones a repository into dest.
 func (c *Client) Clone(ctx context.Context, url string, dest string) error {
 	_, err := c.runner.Run(ctx, "", "git", "clone", url, dest)
 	if err != nil {
@@ -82,6 +91,7 @@ func (c *Client) Clone(ctx context.Context, url string, dest string) error {
 	return nil
 }
 
+// CloneBare clones a repository as bare into dest.
 func (c *Client) CloneBare(ctx context.Context, url string, dest string, depth int) error {
 	args := []string{"clone", "--bare"}
 	if depth > 0 {
@@ -95,6 +105,7 @@ func (c *Client) CloneBare(ctx context.Context, url string, dest string, depth i
 	return nil
 }
 
+// Fetch fetches refspec from remote into repoDir.
 func (c *Client) Fetch(ctx context.Context, repoDir string, remote string, refspec string) error {
 	_, err := c.runner.Run(ctx, repoDir, "git", "fetch", remote, refspec)
 	if err != nil {
@@ -103,6 +114,7 @@ func (c *Client) Fetch(ctx context.Context, repoDir string, remote string, refsp
 	return nil
 }
 
+// WorktreeAdd adds a worktree for branch at worktreePath.
 func (c *Client) WorktreeAdd(ctx context.Context, repoDir string, worktreePath string, branch string) error {
 	_, err := c.runner.Run(ctx, repoDir, "git", "worktree", "add", worktreePath, branch)
 	if err != nil {
@@ -111,6 +123,7 @@ func (c *Client) WorktreeAdd(ctx context.Context, repoDir string, worktreePath s
 	return nil
 }
 
+// WorktreeRemove removes a worktree from repoDir.
 func (c *Client) WorktreeRemove(ctx context.Context, repoDir string, worktreePath string, force bool) error {
 	args := []string{"worktree", "remove"}
 	if force {
@@ -124,6 +137,7 @@ func (c *Client) WorktreeRemove(ctx context.Context, repoDir string, worktreePat
 	return nil
 }
 
+// WorktreeList returns parsed worktree entries for repoDir.
 func (c *Client) WorktreeList(ctx context.Context, repoDir string) ([]Worktree, error) {
 	output, err := c.runner.Run(ctx, repoDir, "git", "worktree", "list", "--porcelain")
 	if err != nil {
@@ -132,6 +146,7 @@ func (c *Client) WorktreeList(ctx context.Context, repoDir string) ([]Worktree, 
 	return parseWorktreeList(output), nil
 }
 
+// HasWorktreeForBranch reports the path of an existing worktree for branch.
 func (c *Client) HasWorktreeForBranch(ctx context.Context, repoDir string, branch string) (string, bool, error) {
 	worktrees, err := c.WorktreeList(ctx, repoDir)
 	if err != nil {
@@ -145,6 +160,7 @@ func (c *Client) HasWorktreeForBranch(ctx context.Context, repoDir string, branc
 	return "", false, nil
 }
 
+// AddRemote adds a git remote to repoDir.
 func (c *Client) AddRemote(ctx context.Context, repoDir string, name string, url string) error {
 	_, err := c.runner.Run(ctx, repoDir, "git", "remote", "add", name, url)
 	if err != nil {
@@ -153,6 +169,7 @@ func (c *Client) AddRemote(ctx context.Context, repoDir string, name string, url
 	return nil
 }
 
+// HasRemote reports whether repoDir already defines remote name.
 func (c *Client) HasRemote(ctx context.Context, repoDir string, name string) (bool, error) {
 	output, err := c.runner.Run(ctx, repoDir, "git", "remote")
 	if err != nil {
@@ -167,6 +184,7 @@ func (c *Client) HasRemote(ctx context.Context, repoDir string, name string) (bo
 	return false, nil
 }
 
+// RemoteURL returns the configured URL for remote name.
 func (c *Client) RemoteURL(ctx context.Context, repoDir string, name string) (string, error) {
 	output, err := c.runner.Run(ctx, repoDir, "git", "config", "--get", fmt.Sprintf("remote.%s.url", name))
 	if err != nil {
@@ -175,6 +193,7 @@ func (c *Client) RemoteURL(ctx context.Context, repoDir string, name string) (st
 	return strings.TrimSpace(output), nil
 }
 
+// SetRemoteURL updates the configured URL for remote name.
 func (c *Client) SetRemoteURL(ctx context.Context, repoDir string, name string, url string) error {
 	_, err := c.runner.Run(ctx, repoDir, "git", "remote", "set-url", name, url)
 	if err != nil {
@@ -183,6 +202,7 @@ func (c *Client) SetRemoteURL(ctx context.Context, repoDir string, name string, 
 	return nil
 }
 
+// SetUpstream sets branch to track upstream.
 func (c *Client) SetUpstream(ctx context.Context, repoDir string, branch string, upstream string) error {
 	_, err := c.runner.Run(ctx, repoDir, "git", "branch", "--set-upstream-to="+upstream, branch)
 	if err != nil {
@@ -191,6 +211,7 @@ func (c *Client) SetUpstream(ctx context.Context, repoDir string, branch string,
 	return nil
 }
 
+// ConfigSet writes a git config key in repoDir.
 func (c *Client) ConfigSet(ctx context.Context, repoDir string, key string, value string) error {
 	_, err := c.runner.Run(ctx, repoDir, "git", "config", key, value)
 	if err != nil {
@@ -199,6 +220,7 @@ func (c *Client) ConfigSet(ctx context.Context, repoDir string, key string, valu
 	return nil
 }
 
+// ConfigSetWorktree writes a worktree-local git config key in repoDir.
 func (c *Client) ConfigSetWorktree(ctx context.Context, repoDir string, key string, value string) error {
 	_, err := c.runner.Run(ctx, repoDir, "git", "config", "--worktree", key, value)
 	if err != nil {
@@ -207,6 +229,7 @@ func (c *Client) ConfigSetWorktree(ctx context.Context, repoDir string, key stri
 	return nil
 }
 
+// WorktreeAddBranch adds a worktree and creates or resets branch from startPoint.
 func (c *Client) WorktreeAddBranch(ctx context.Context, repoDir string, worktreePath string, branch string, startPoint string, force bool) error {
 	flag := "-b"
 	if force {
@@ -222,10 +245,12 @@ func (c *Client) WorktreeAddBranch(ctx context.Context, repoDir string, worktree
 	return nil
 }
 
+// OriginURL returns the URL configured for origin.
 func (c *Client) OriginURL(ctx context.Context, repoDir string) (string, error) {
 	return c.RemoteURL(ctx, repoDir, "origin")
 }
 
+// Worktree describes a git worktree path and branch.
 type Worktree struct {
 	Path   string
 	Branch string

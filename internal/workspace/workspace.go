@@ -14,10 +14,12 @@ import (
 	"github.com/BradyPlanden/prt/internal/github"
 )
 
+// Options controls resolver behavior for temp versus persistent worktrees.
 type Options struct {
 	Temp bool
 }
 
+// Result is the resolved workspace location and related metadata.
 type Result struct {
 	Path     string
 	RepoDir  string
@@ -25,23 +27,28 @@ type Result struct {
 	Warnings []string
 }
 
+// CleanResult describes one removed or removable worktree path.
 type CleanResult struct {
 	Path string
 }
 
+// Resolver maps PR metadata to persistent or temporary worktrees.
 type Resolver struct {
 	git    GitClient
 	logger Logger
 }
 
+// Logger provides warning output hooks.
 type Logger interface {
 	Printf(format string, args ...any)
 }
 
+// ResolverOptions configures optional resolver behavior.
 type ResolverOptions struct {
 	Logger Logger
 }
 
+// GitClient defines the git operations required by Resolver.
 type GitClient interface {
 	IsGitRepo(ctx context.Context, repoDir string) (bool, error)
 	Clone(ctx context.Context, url string, dest string) error
@@ -60,10 +67,12 @@ type GitClient interface {
 	WorktreeAddBranch(ctx context.Context, repoDir string, worktreePath string, branch string, startPoint string, force bool) error
 }
 
+// NewResolver constructs a Resolver with the provided git client.
 func NewResolver(client GitClient, opts ResolverOptions) *Resolver {
 	return &Resolver{git: client, logger: opts.Logger}
 }
 
+// Resolve returns an existing or newly created worktree for a PR.
 func (r *Resolver) Resolve(ctx context.Context, cfg config.Config, pr github.PRMetadata, opts Options) (Result, error) {
 	if opts.Temp {
 		return r.resolveTemp(ctx, cfg, pr)
@@ -218,6 +227,7 @@ func (r *Resolver) ensureReadyWorktree(ctx context.Context, repoDir string, work
 	return nil
 }
 
+// CleanTemp removes temp worktrees in tempDir based on ttl and options.
 func (r *Resolver) CleanTemp(ctx context.Context, tempDir string, ttl time.Duration, removeAll bool, dryRun bool) ([]CleanResult, error) {
 	entries, err := os.ReadDir(tempDir)
 	if err != nil {

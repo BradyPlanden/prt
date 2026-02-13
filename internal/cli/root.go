@@ -19,6 +19,7 @@ type rootOptions struct {
 	Config   string
 }
 
+// Execute runs the root prt command.
 func Execute() error {
 	cmd := newRootCommand()
 	return cmd.Execute()

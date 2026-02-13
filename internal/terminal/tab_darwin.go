@@ -15,6 +15,7 @@ type opener struct {
 	custom func(path string) error
 }
 
+// Detect returns a macOS terminal opener based on configured preference.
 func Detect(cfg Config) (TabOpener, error) {
 	term := normalizeTerminal(cfg.Terminal)
 	if term == "auto" {

@@ -12,12 +12,14 @@ import (
 	"strings"
 )
 
+// PRRef identifies a pull request by repository and number.
 type PRRef struct {
 	Owner  string
 	Repo   string
 	Number int
 }
 
+// Repository identifies a GitHub repository and clone URL.
 type Repository struct {
 	Owner    string
 	Name     string
@@ -25,6 +27,7 @@ type Repository struct {
 	CloneURL string
 }
 
+// PRMetadata contains pull request details required for worktree setup.
 type PRMetadata struct {
 	Number   int
 	Title    string
@@ -35,27 +38,33 @@ type PRMetadata struct {
 	HeadRepo Repository
 }
 
+// Client fetches pull request metadata via the gh CLI.
 type Client struct {
 	runner  Runner
 	verbose bool
 }
 
+// ClientOptions configures a GitHub metadata client.
 type ClientOptions struct {
 	Verbose bool
 	Runner  Runner
 }
 
+// Runner executes external commands for metadata retrieval.
 type Runner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
+// ExecRunner executes commands via os/exec.
 type ExecRunner struct{}
 
+// Run executes a command and returns combined output.
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd.CombinedOutput()
 }
 
+// NewClient constructs a Client using defaults when options are omitted.
 func NewClient(opts ClientOptions) *Client {
 	runner := opts.Runner
 	if runner == nil {
@@ -64,6 +73,7 @@ func NewClient(opts ClientOptions) *Client {
 	return &Client{runner: runner, verbose: opts.Verbose}
 }
 
+// ParsePRURL parses a GitHub pull request URL into owner, repo, and number.
 func ParsePRURL(prURL string) (PRRef, error) {
 	parsed, err := url.Parse(prURL)
 	if err != nil {
@@ -104,6 +114,7 @@ func ParsePRURL(prURL string) (PRRef, error) {
 	return PRRef{Owner: owner, Repo: repo, Number: number}, nil
 }
 
+// FetchPRMetadata loads pull request metadata needed to resolve worktrees.
 func (c *Client) FetchPRMetadata(ctx context.Context, prURL string) (PRMetadata, error) {
 	ref, err := ParsePRURL(prURL)
 	if err != nil {
