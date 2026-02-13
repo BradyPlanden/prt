@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Validate release tag
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release tag: $VERSION"
+            echo "Expected semver like v1.2.3 or v1.2.3-rc.1"
+            exit 1
+          fi
+
+      - name: Build release artifacts
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          repo_root="$PWD"
+
+          targets=(
+            "darwin amd64"
+            "darwin arm64"
+            "linux amd64"
+            "linux arm64"
+            "windows amd64"
+          )
+
+          for target in "${targets[@]}"; do
+            read -r goos goarch <<< "$target"
+            ext=""
+            if [ "$goos" = "windows" ]; then
+              ext=".exe"
+            fi
+
+            pkg="prt_${VERSION}_${goos}_${goarch}"
+            stage_dir="$(mktemp -d)"
+            package_root="${stage_dir}/${pkg}"
+            mkdir -p "$package_root"
+
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "${package_root}/prt${ext}" \
+              ./cmd/prt
+
+            cp LICENSE README.md "$package_root/"
+
+            if [ "$goos" = "windows" ]; then
+              (cd "$stage_dir" && zip -q -r "${repo_root}/dist/${pkg}.zip" "$pkg")
+            else
+              (cd "$stage_dir" && tar -czf "${repo_root}/dist/${pkg}.tar.gz" "$pkg")
+            fi
+
+            rm -rf "$stage_dir"
+          done
+
+          (cd dist && sha256sum * > checksums.txt)
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          generate_release_notes: true

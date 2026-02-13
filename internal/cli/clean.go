@@ -21,6 +21,9 @@ func newCleanCommand(rootOpts *rootOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "clean",
 		Short: "Remove old temporary worktrees",
+		Example: "" +
+			"  prt clean --dry-run\n" +
+			"  prt clean --all",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runClean(cmd, rootOpts, opts)
 		},

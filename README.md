@@ -25,6 +25,21 @@ prt clean --dry-run
 prt clean --all
 ```
 
+## Shell completion
+
+Generate shell completion scripts:
+
+```bash
+# bash
+prt completion bash > /etc/bash_completion.d/prt
+
+# zsh
+prt completion zsh > "${fpath[1]}/_prt"
+
+# fish
+prt completion fish > ~/.config/fish/completions/prt.fish
+```
+
 ## Config
 
 Create `~/.config/prt/config.yaml`:
