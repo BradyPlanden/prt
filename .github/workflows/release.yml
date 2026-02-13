@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   release:
@@ -83,6 +84,136 @@ jobs:
           done
 
           (cd dist && sha256sum * > checksums.txt)
+
+      - name: Update Homebrew formulas in tap
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          VERSION: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git fetch origin "$DEFAULT_BRANCH"
+          git checkout "$DEFAULT_BRANCH"
+          git pull --ff-only origin "$DEFAULT_BRANCH"
+
+          version_no_v="${VERSION#v}"
+          major_minor="$(echo "$version_no_v" | awk -F. '{print $1 "." $2}')"
+          formula_version_class="PrtAT$(echo "$major_minor" | tr -d '.')"
+          tarball_url="https://github.com/${REPO}/archive/refs/tags/${VERSION}.tar.gz"
+          sha256="$(curl -fsSL "$tarball_url" | sha256sum | awk '{print $1}')"
+
+          # Guard against rare class-name collisions (e.g. 1.10 vs 11.0).
+          for existing in Formula/prt@*.rb; do
+            [ -e "$existing" ] || continue
+            if [ "$existing" = "Formula/prt@${major_minor}.rb" ]; then
+              continue
+            fi
+            if grep -q "^class ${formula_version_class} < Formula$" "$existing"; then
+              echo "Formula class collision detected for ${formula_version_class} in ${existing}"
+              echo "Refusing to auto-generate Formula/prt@${major_minor}.rb"
+              exit 1
+            fi
+          done
+
+          cat > Formula/prt.rb <<EOF
+          class Prt < Formula
+            desc "Open GitHub pull requests in isolated git worktrees"
+            homepage "https://github.com/BradyPlanden/prt"
+            url "${tarball_url}"
+            sha256 "${sha256}"
+            license "MIT"
+
+            depends_on "go" => :build
+
+            def install
+              ldflags = %W[
+                -s
+                -w
+                -X
+                main.version=v#{version}
+              ]
+
+              system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/prt"
+            end
+
+            test do
+              assert_match "Open a GitHub PR", shell_output("#{bin}/prt --help")
+            end
+          end
+          EOF
+
+          cat > "Formula/prt@${major_minor}.rb" <<EOF
+          class ${formula_version_class} < Formula
+            desc "Open GitHub pull requests in isolated git worktrees"
+            homepage "https://github.com/BradyPlanden/prt"
+            url "${tarball_url}"
+            sha256 "${sha256}"
+            license "MIT"
+
+            keg_only :versioned_formula
+
+            depends_on "go" => :build
+
+            def install
+              ldflags = %W[
+                -s
+                -w
+                -X
+                main.version=v#{version}
+              ]
+
+              system "go", "build", *std_go_args(ldflags: ldflags), "./cmd/prt"
+            end
+
+            test do
+              assert_match "Open a GitHub PR", shell_output("#{bin}/prt --help")
+            end
+          end
+          EOF
+
+          if git diff --quiet -- Formula/prt.rb "Formula/prt@${major_minor}.rb"; then
+            echo "Homebrew formulas already up to date."
+            exit 0
+          fi
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/prt.rb "Formula/prt@${major_minor}.rb"
+          git commit -m "chore(brew): update formulas for ${VERSION}"
+
+          # Prefer direct updates so the tap is ready immediately.
+          if git push origin "HEAD:${DEFAULT_BRANCH}"; then
+            echo "Pushed formula updates directly to ${DEFAULT_BRANCH}."
+            exit 0
+          fi
+
+          # Fallback for protected branches: push to a branch and open a PR.
+          safe_version="${VERSION//[^A-Za-z0-9._-]/-}"
+          fallback_branch="chore/brew-update-${safe_version}-${GITHUB_RUN_ID}"
+          git push --force-with-lease origin "HEAD:${fallback_branch}"
+
+          existing_pr_number="$(gh pr list \
+            --repo "$REPO" \
+            --base "$DEFAULT_BRANCH" \
+            --head "$fallback_branch" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+
+          if [ -n "$existing_pr_number" ]; then
+            echo "PR #${existing_pr_number} already open for Homebrew formula updates."
+            exit 0
+          fi
+
+          gh pr create \
+            --repo "$REPO" \
+            --base "$DEFAULT_BRANCH" \
+            --head "$fallback_branch" \
+            --title "chore(brew): update formulas for ${VERSION}" \
+            --body "Automated Homebrew formula updates for \`${VERSION}\`."
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

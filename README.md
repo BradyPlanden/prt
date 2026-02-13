@@ -14,6 +14,34 @@ A CLI tool for opening a GitHub pull request in a new terminal tab using git wor
 go install github.com/BradyPlanden/prt/cmd/prt@latest
 ```
 
+Homebrew tap:
+
+```bash
+brew tap BradyPlanden/prt https://github.com/BradyPlanden/prt
+brew install BradyPlanden/prt/prt
+```
+
+Install the specific version's:
+
+```bash
+brew install BradyPlanden/prt/prt@0.1
+```
+
+specific versions are keg-only. Run them directly:
+
+```bash
+$(brew --prefix)/opt/prt@0.1/bin/prt --version
+```
+
+Or make it your active `prt`:
+
+```bash
+brew unlink prt
+brew link --force prt@0.1
+```
+
+Note: tap installs are pinned to tagged releases and build from source.
+
 ## Usage
 
 ```bash
