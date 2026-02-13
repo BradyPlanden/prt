@@ -8,6 +8,10 @@ import (
 	"strings"
 )
 
+// ErrBranchExists is returned when a branch creation fails because the
+// branch already exists (e.g. stale leftover after manual worktree removal).
+var ErrBranchExists = errors.New("branch already exists")
+
 type Runner interface {
 	Run(ctx context.Context, dir string, name string, args ...string) (string, error)
 }
@@ -141,12 +145,85 @@ func (c *Client) HasWorktreeForBranch(ctx context.Context, repoDir string, branc
 	return "", false, nil
 }
 
-func (c *Client) OriginURL(ctx context.Context, repoDir string) (string, error) {
-	output, err := c.runner.Run(ctx, repoDir, "git", "config", "--get", "remote.origin.url")
+func (c *Client) AddRemote(ctx context.Context, repoDir string, name string, url string) error {
+	_, err := c.runner.Run(ctx, repoDir, "git", "remote", "add", name, url)
 	if err != nil {
-		return "", fmt.Errorf("git config --get remote.origin.url failed: %w", err)
+		return fmt.Errorf("git remote add failed: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) HasRemote(ctx context.Context, repoDir string, name string) (bool, error) {
+	output, err := c.runner.Run(ctx, repoDir, "git", "remote")
+	if err != nil {
+		return false, fmt.Errorf("git remote failed: %w", err)
+	}
+	remotes := strings.Split(output, "\n")
+	for _, remote := range remotes {
+		if strings.TrimSpace(remote) == name {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *Client) RemoteURL(ctx context.Context, repoDir string, name string) (string, error) {
+	output, err := c.runner.Run(ctx, repoDir, "git", "config", "--get", fmt.Sprintf("remote.%s.url", name))
+	if err != nil {
+		return "", fmt.Errorf("git config --get remote.%s.url failed: %w", name, err)
 	}
 	return strings.TrimSpace(output), nil
+}
+
+func (c *Client) SetRemoteURL(ctx context.Context, repoDir string, name string, url string) error {
+	_, err := c.runner.Run(ctx, repoDir, "git", "remote", "set-url", name, url)
+	if err != nil {
+		return fmt.Errorf("git remote set-url failed: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) SetUpstream(ctx context.Context, repoDir string, branch string, upstream string) error {
+	_, err := c.runner.Run(ctx, repoDir, "git", "branch", "--set-upstream-to="+upstream, branch)
+	if err != nil {
+		return fmt.Errorf("git branch --set-upstream-to failed: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) ConfigSet(ctx context.Context, repoDir string, key string, value string) error {
+	_, err := c.runner.Run(ctx, repoDir, "git", "config", key, value)
+	if err != nil {
+		return fmt.Errorf("git config failed: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) ConfigSetWorktree(ctx context.Context, repoDir string, key string, value string) error {
+	_, err := c.runner.Run(ctx, repoDir, "git", "config", "--worktree", key, value)
+	if err != nil {
+		return fmt.Errorf("git config --worktree failed: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) WorktreeAddBranch(ctx context.Context, repoDir string, worktreePath string, branch string, startPoint string, force bool) error {
+	flag := "-b"
+	if force {
+		flag = "-B"
+	}
+	output, err := c.runner.Run(ctx, repoDir, "git", "worktree", "add", flag, branch, worktreePath, startPoint)
+	if err != nil {
+		if !force && strings.Contains(output, "already exists") {
+			return fmt.Errorf("git worktree add %s failed: %w", flag, ErrBranchExists)
+		}
+		return fmt.Errorf("git worktree add %s failed: %w", flag, err)
+	}
+	return nil
+}
+
+func (c *Client) OriginURL(ctx context.Context, repoDir string) (string, error) {
+	return c.RemoteURL(ctx, repoDir, "origin")
 }
 
 type Worktree struct {

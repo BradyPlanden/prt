@@ -19,9 +19,10 @@ type Options struct {
 }
 
 type Result struct {
-	Path    string
-	RepoDir string
-	Reused  bool
+	Path     string
+	RepoDir  string
+	Reused   bool
+	Warnings []string
 }
 
 type CleanResult struct {
@@ -51,6 +52,12 @@ type GitClient interface {
 	WorktreeList(ctx context.Context, repoDir string) ([]git.Worktree, error)
 	HasWorktreeForBranch(ctx context.Context, repoDir string, branch string) (string, bool, error)
 	OriginURL(ctx context.Context, repoDir string) (string, error)
+	AddRemote(ctx context.Context, repoDir string, name string, url string) error
+	HasRemote(ctx context.Context, repoDir string, name string) (bool, error)
+	SetUpstream(ctx context.Context, repoDir string, branch string, upstream string) error
+	ConfigSet(ctx context.Context, repoDir string, key string, value string) error
+	ConfigSetWorktree(ctx context.Context, repoDir string, key string, value string) error
+	WorktreeAddBranch(ctx context.Context, repoDir string, worktreePath string, branch string, startPoint string, force bool) error
 }
 
 func NewResolver(client GitClient, opts ResolverOptions) *Resolver {
@@ -74,11 +81,29 @@ func (r *Resolver) resolvePersistent(ctx context.Context, cfg config.Config, pr 
 		return Result{}, err
 	}
 
+	if isCrossRepo(pr) {
+		if err := ensureRemote(ctx, r.git, repoDir, forkRemoteName(pr), pr.HeadRepo.CloneURL); err != nil {
+			return Result{}, err
+		}
+	}
+
 	branchRef := branchRefForPR(pr)
 	if path, ok, err := r.git.HasWorktreeForBranch(ctx, repoDir, branchRef); err != nil {
 		return Result{}, err
 	} else if ok {
-		return Result{Path: path, RepoDir: repoDir, Reused: true}, nil
+		result := Result{Path: path, RepoDir: repoDir, Reused: true}
+		if err := fetchPR(ctx, r.git, repoDir, pr); err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("fetch failed for existing worktree (working offline?): %v", err))
+		}
+		if err := r.ensureReadyWorktree(ctx, repoDir, path, pr); err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("could not update worktree tracking config: %v", err))
+		}
+		r.logWarnings(result.Warnings)
+		return result, nil
+	}
+
+	if err := fetchPR(ctx, r.git, repoDir, pr); err != nil {
+		return Result{}, err
 	}
 
 	worktreeRoot := repoDir + "-worktrees"
@@ -91,11 +116,20 @@ func (r *Resolver) resolvePersistent(ctx context.Context, cfg config.Config, pr 
 		return Result{}, fmt.Errorf("worktree path already exists: %s", worktreePath)
 	}
 
-	if err := fetchPR(ctx, r.git, repoDir, pr); err != nil {
-		return Result{}, err
+	startPoint := remoteRefForPR(pr)
+	if err := r.git.WorktreeAddBranch(ctx, repoDir, worktreePath, branchRef, startPoint, false); err != nil {
+		if !errors.Is(err, git.ErrBranchExists) {
+			return Result{}, err
+		}
+		// Branch exists as a stale leftover (e.g. after manual worktree
+		// cleanup). Since HasWorktreeForBranch already confirmed no worktree
+		// is using it, force-reset the branch with -B.
+		if err := r.git.WorktreeAddBranch(ctx, repoDir, worktreePath, branchRef, startPoint, true); err != nil {
+			return Result{}, err
+		}
 	}
 
-	if err := r.git.WorktreeAdd(ctx, repoDir, worktreePath, branchRef); err != nil {
+	if err := r.ensureReadyWorktree(ctx, repoDir, worktreePath, pr); err != nil {
 		return Result{}, err
 	}
 
@@ -114,11 +148,29 @@ func (r *Resolver) resolveTemp(ctx context.Context, cfg config.Config, pr github
 		return Result{}, err
 	}
 
+	if isCrossRepo(pr) {
+		if err := ensureRemote(ctx, r.git, bareDir, forkRemoteName(pr), pr.HeadRepo.CloneURL); err != nil {
+			return Result{}, err
+		}
+	}
+
 	branchRef := branchRefForPR(pr)
 	if path, ok, err := r.git.HasWorktreeForBranch(ctx, bareDir, branchRef); err != nil {
 		return Result{}, err
 	} else if ok {
-		return Result{Path: path, RepoDir: bareDir, Reused: true}, nil
+		result := Result{Path: path, RepoDir: bareDir, Reused: true}
+		if err := fetchPR(ctx, r.git, bareDir, pr); err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("fetch failed for existing worktree (working offline?): %v", err))
+		}
+		if err := r.ensureReadyWorktree(ctx, bareDir, path, pr); err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("could not update worktree tracking config: %v", err))
+		}
+		r.logWarnings(result.Warnings)
+		return result, nil
+	}
+
+	if err := fetchPR(ctx, r.git, bareDir, pr); err != nil {
+		return Result{}, err
 	}
 
 	worktreePath := filepath.Join(cfg.TempDir, repoSlug+"-"+worktreeName(pr))
@@ -126,15 +178,44 @@ func (r *Resolver) resolveTemp(ctx context.Context, cfg config.Config, pr github
 		return Result{}, fmt.Errorf("worktree path already exists: %s", worktreePath)
 	}
 
-	if err := fetchPR(ctx, r.git, bareDir, pr); err != nil {
+	startPoint := remoteRefForPR(pr)
+	if err := r.git.WorktreeAddBranch(ctx, bareDir, worktreePath, branchRef, startPoint, true); err != nil {
 		return Result{}, err
 	}
 
-	if err := r.git.WorktreeAdd(ctx, bareDir, worktreePath, branchRef); err != nil {
+	if err := r.ensureReadyWorktree(ctx, bareDir, worktreePath, pr); err != nil {
 		return Result{}, err
 	}
 
 	return Result{Path: worktreePath, RepoDir: bareDir}, nil
+}
+
+func (r *Resolver) logWarnings(warnings []string) {
+	if r.logger == nil {
+		return
+	}
+	for _, w := range warnings {
+		r.logger.Printf("Warning: %s", w)
+	}
+}
+
+func (r *Resolver) ensureReadyWorktree(ctx context.Context, repoDir string, worktreePath string, pr github.PRMetadata) error {
+	branchRef := branchRefForPR(pr)
+	upstream := remoteRefForPR(pr)
+
+	if err := r.git.SetUpstream(ctx, worktreePath, branchRef, upstream); err != nil {
+		return err
+	}
+	if !isCrossRepo(pr) {
+		return nil
+	}
+	if err := r.git.ConfigSet(ctx, repoDir, "extensions.worktreeConfig", "true"); err != nil {
+		return err
+	}
+	if err := r.git.ConfigSetWorktree(ctx, worktreePath, "push.default", "upstream"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *Resolver) CleanTemp(ctx context.Context, tempDir string, ttl time.Duration, removeAll bool, dryRun bool) ([]CleanResult, error) {
@@ -225,7 +306,11 @@ func resolveRepoDir(ctx context.Context, client GitClient, projectsDir string, r
 		if isRepo {
 			origin, err := client.OriginURL(ctx, primary)
 			if err != nil {
-				return primary, nil
+				if logger != nil {
+					logger.Printf("Warning: repo at %s has no origin; using %s", primary, filepath.Join(projectsDir, repoSlug(repo)))
+				}
+				alternate := filepath.Join(projectsDir, repoSlug(repo))
+				return alternate, nil
 			}
 			if repoMatchesOrigin(origin, repo) {
 				return primary, nil
@@ -257,6 +342,15 @@ func ensureRepo(ctx context.Context, client GitClient, repoDir string, cloneURL 
 	if !isRepo {
 		return fmt.Errorf("path is not a git repository: %s", repoDir)
 	}
+
+	hasOrigin, err := client.HasRemote(ctx, repoDir, "origin")
+	if err != nil {
+		return err
+	}
+	if !hasOrigin {
+		return client.AddRemote(ctx, repoDir, "origin", cloneURL)
+	}
+
 	return nil
 }
 
@@ -265,26 +359,31 @@ func ensureBareRepo(ctx context.Context, client GitClient, bareDir string, clone
 		if err := client.CloneBare(ctx, cloneURL, bareDir, 0); err != nil {
 			return err
 		}
-		return nil
+	} else {
+		isRepo, err := client.IsGitRepo(ctx, bareDir)
+		if err != nil {
+			return err
+		}
+		if !isRepo {
+			return fmt.Errorf("path is not a git repository: %s", bareDir)
+		}
 	}
 
-	isRepo, err := client.IsGitRepo(ctx, bareDir)
-	if err != nil {
-		return err
-	}
-	if !isRepo {
-		return fmt.Errorf("path is not a git repository: %s", bareDir)
-	}
-	return nil
+	return client.ConfigSet(ctx, bareDir, "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 }
 
 func fetchPR(ctx context.Context, client GitClient, repoDir string, pr github.PRMetadata) error {
-	branchRef := branchRefForPR(pr)
-	refspec := fmt.Sprintf("+%s:%s", pr.HeadRef, branchRef)
-	remote := "origin"
+	var remote string
+	var refspec string
+
 	if isCrossRepo(pr) {
-		remote = pr.HeadRepo.CloneURL
+		remote = forkRemoteName(pr)
+		refspec = fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", pr.HeadRef, remote, pr.HeadRef)
+	} else {
+		remote = "origin"
+		refspec = fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", pr.HeadRef, pr.HeadRef)
 	}
+
 	return client.Fetch(ctx, repoDir, remote, refspec)
 }
 
@@ -293,6 +392,13 @@ func branchRefForPR(pr github.PRMetadata) string {
 		return fmt.Sprintf("pr/%d/%s", pr.Number, pr.HeadRef)
 	}
 	return pr.HeadRef
+}
+
+func remoteRefForPR(pr github.PRMetadata) string {
+	if isCrossRepo(pr) {
+		return fmt.Sprintf("%s/%s", forkRemoteName(pr), pr.HeadRef)
+	}
+	return fmt.Sprintf("origin/%s", pr.HeadRef)
 }
 
 func worktreeName(pr github.PRMetadata) string {
@@ -321,6 +427,23 @@ func pathExists(path string) bool {
 
 func isCrossRepo(pr github.PRMetadata) bool {
 	return !strings.EqualFold(pr.BaseRepo.Owner, pr.HeadRepo.Owner) || !strings.EqualFold(pr.BaseRepo.Name, pr.HeadRepo.Name)
+}
+
+func forkRemoteName(pr github.PRMetadata) string {
+	return fmt.Sprintf("prt/%s/%s", pr.HeadRepo.Owner, pr.HeadRepo.Name)
+}
+
+func ensureRemote(ctx context.Context, client GitClient, repoDir string, name string, url string) error {
+	hasRemote, err := client.HasRemote(ctx, repoDir, name)
+	if err != nil {
+		return err
+	}
+	if !hasRemote {
+		return client.AddRemote(ctx, repoDir, name, url)
+	}
+	// Preserve existing URL — user may have SSH, insteadOf rewrites, or
+	// other auth customizations that differ from the GitHub API CloneURL.
+	return nil
 }
 
 func repoMatchesOrigin(origin string, repo github.Repository) bool {
