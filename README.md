@@ -1,6 +1,19 @@
-# prt
+## Why `prt`?
 
-A CLI tool for opening a GitHub pull request in a new terminal tab using git worktrees.
+Reviewing a PR usually means repetitive setup:
+
+- Locate (or clone) the repo
+- Stash any local changes
+- Create a worktree/checkout the corresponding branch
+- Start reviewing
+
+`prt` compresses that into one command by handling those steps automatically:
+
+```bash
+prt https://github.com/OWNER/REPO/pull/123
+```
+
+which completes the above efficiently and opens a new terminal tab in the configured state.
 
 ## Requirements
 
@@ -96,9 +109,7 @@ Notes:
 - If auto detection cannot identify either app, `prt` prints the resolved path instead.
 - Use `--terminal` or `PRT_TERMINAL` to force `iterm2` or `terminal` when needed.
 
-## Automatic worktree setup
-
-When `prt` opens a PR, it automatically configures the worktree so it's ready to use:
+## Features
 
 - **Upstream tracking**: The local branch is set to track the remote PR branch, so `git pull`/`git push` work out of the box.
 - **Fork remotes**: For cross-repo (fork) PRs, a remote named `prt/<owner>/<repo>` is added pointing to the fork. Existing remote URLs are never overwritten — if you've configured SSH or custom URL rewriting, your settings are preserved.
