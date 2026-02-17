@@ -1,10 +1,16 @@
-## Why `prt`?
+<p align="center">
+    <img src="./assets/prt-logo.png" alt="prt-logo" width="150" />
+</p>
 
-Reviewing a PR usually means repetitive setup:
+## The 'pitch'
+
+Reviewing a PR can require the following repetitive setup:
 
 - Locate (or clone) the repo
 - Stash any local changes
-- Create a worktree/checkout the corresponding branch
+- Determine the corresponding branch name
+- Create a worktree or checkout the branch
+- Initialise submodules, fetch the default branch, etc.
 - Start reviewing
 
 `prt` compresses that into one command by handling those steps automatically:
