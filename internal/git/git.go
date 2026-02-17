@@ -114,6 +114,24 @@ func (c *Client) Fetch(ctx context.Context, repoDir string, remote string, refsp
 	return nil
 }
 
+// FetchBranch fetches a single branch from remote into repoDir.
+func (c *Client) FetchBranch(ctx context.Context, repoDir string, remote string, branch string) error {
+	_, err := c.runner.Run(ctx, repoDir, "git", "fetch", remote, branch)
+	if err != nil {
+		return fmt.Errorf("git fetch branch failed: %w", err)
+	}
+	return nil
+}
+
+// SubmoduleUpdate initializes and updates submodules recursively in repoDir.
+func (c *Client) SubmoduleUpdate(ctx context.Context, repoDir string) error {
+	_, err := c.runner.Run(ctx, repoDir, "git", "submodule", "update", "--init", "--recursive")
+	if err != nil {
+		return fmt.Errorf("git submodule update failed: %w", err)
+	}
+	return nil
+}
+
 // WorktreeAdd adds a worktree for branch at worktreePath.
 func (c *Client) WorktreeAdd(ctx context.Context, repoDir string, worktreePath string, branch string) error {
 	_, err := c.runner.Run(ctx, repoDir, "git", "worktree", "add", worktreePath, branch)
@@ -175,8 +193,8 @@ func (c *Client) HasRemote(ctx context.Context, repoDir string, name string) (bo
 	if err != nil {
 		return false, fmt.Errorf("git remote failed: %w", err)
 	}
-	remotes := strings.Split(output, "\n")
-	for _, remote := range remotes {
+	remotes := strings.SplitSeq(output, "\n")
+	for remote := range remotes {
 		if strings.TrimSpace(remote) == name {
 			return true, nil
 		}
@@ -260,8 +278,8 @@ func parseWorktreeList(output string) []Worktree {
 	var worktrees []Worktree
 	var current *Worktree
 
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(output, "\n")
+	for line := range lines {
 		if strings.HasPrefix(line, "worktree ") {
 			if current != nil {
 				worktrees = append(worktrees, *current)
@@ -285,11 +303,11 @@ func branchMatches(ref string, branch string) bool {
 	if ref == branch {
 		return true
 	}
-	if strings.HasPrefix(ref, "refs/heads/") {
-		return strings.TrimPrefix(ref, "refs/heads/") == branch
+	if after, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
+		return after == branch
 	}
-	if strings.HasPrefix(branch, "refs/heads/") {
-		return strings.TrimPrefix(branch, "refs/heads/") == ref
+	if after, ok := strings.CutPrefix(branch, "refs/heads/"); ok {
+		return after == ref
 	}
 	return false
 }

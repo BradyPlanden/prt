@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,15 +16,19 @@ import (
 )
 
 type fakeGit struct {
-	repos      map[string]*fakeRepo
-	fetches    []fetchCall
-	adds       []addCall
-	upstreams  []upstreamCall
-	configs    []configCall
+	repos                 map[string]*fakeRepo
+	fetches               []fetchCall
+	branchFetches         []branchFetchCall
+	submoduleUpdates      []string
+	adds                  []addCall
+	upstreams             []upstreamCall
+	configs               []configCall
 	branchAdds            []branchAddCall
 	fetchErr              error
 	branchAddFirstCallErr error
 	branchAddCallCount    int
+	fetchBranchErr        error
+	submoduleUpdateErr    error
 }
 
 type fakeRepo struct {
@@ -36,6 +41,12 @@ type fetchCall struct {
 	repoDir string
 	remote  string
 	refspec string
+}
+
+type branchFetchCall struct {
+	repoDir string
+	remote  string
+	branch  string
 }
 
 type addCall struct {
@@ -65,12 +76,14 @@ type branchAddCall struct {
 
 func newFakeGit() *fakeGit {
 	return &fakeGit{
-		repos:      make(map[string]*fakeRepo),
-		fetches:    []fetchCall{},
-		adds:       []addCall{},
-		upstreams:  []upstreamCall{},
-		configs:    []configCall{},
-		branchAdds: []branchAddCall{},
+		repos:            make(map[string]*fakeRepo),
+		fetches:          []fetchCall{},
+		branchFetches:    []branchFetchCall{},
+		submoduleUpdates: []string{},
+		adds:             []addCall{},
+		upstreams:        []upstreamCall{},
+		configs:          []configCall{},
+		branchAdds:       []branchAddCall{},
 	}
 }
 
@@ -98,6 +111,16 @@ func (f *fakeGit) CloneBare(ctx context.Context, url string, dest string, depth 
 func (f *fakeGit) Fetch(ctx context.Context, repoDir string, remote string, refspec string) error {
 	f.fetches = append(f.fetches, fetchCall{repoDir: repoDir, remote: remote, refspec: refspec})
 	return f.fetchErr
+}
+
+func (f *fakeGit) FetchBranch(ctx context.Context, repoDir string, remote string, branch string) error {
+	f.branchFetches = append(f.branchFetches, branchFetchCall{repoDir: repoDir, remote: remote, branch: branch})
+	return f.fetchBranchErr
+}
+
+func (f *fakeGit) SubmoduleUpdate(ctx context.Context, repoDir string) error {
+	f.submoduleUpdates = append(f.submoduleUpdates, repoDir)
+	return f.submoduleUpdateErr
 }
 
 func (f *fakeGit) WorktreeAdd(ctx context.Context, repoDir string, worktreePath string, branch string) error {
@@ -778,6 +801,7 @@ func makePR(baseOwner, baseRepo, headOwner, headRepo, headRef string, number int
 	return github.PRMetadata{
 		Number:  number,
 		HeadRef: headRef,
+		BaseRef: "main",
 		BaseRepo: github.Repository{
 			Owner:    baseOwner,
 			Name:     baseRepo,
@@ -788,5 +812,138 @@ func makePR(baseOwner, baseRepo, headOwner, headRepo, headRef string, number int
 			Name:     headRepo,
 			CloneURL: "https://github.com/" + headOwner + "/" + headRepo + ".git",
 		},
+	}
+}
+
+func TestResolveNewWorktreeFetchesBaseBranch(t *testing.T) {
+	projectsDir := t.TempDir()
+	cfg := config.Config{ProjectsDir: projectsDir, TempDir: t.TempDir(), TempTTL: 24 * time.Hour}
+	pr := makePR("octo", "repo", "octo", "repo", "feature", 15)
+
+	fake := newFakeGit()
+	resolver := NewResolver(fake, ResolverOptions{})
+
+	result, err := resolver.Resolve(context.Background(), cfg, pr, Options{Temp: false})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	// Verify base branch fetch was attempted.
+	if len(fake.branchFetches) != 1 {
+		t.Fatalf("expected one base branch fetch, got %d", len(fake.branchFetches))
+	}
+	if fake.branchFetches[0].branch != "main" {
+		t.Fatalf("expected base branch main, got %s", fake.branchFetches[0].branch)
+	}
+	if fake.branchFetches[0].remote != "origin" {
+		t.Fatalf("expected remote origin, got %s", fake.branchFetches[0].remote)
+	}
+
+	// Verify submodule update was attempted in the worktree.
+	if len(fake.submoduleUpdates) != 1 {
+		t.Fatalf("expected one submodule update, got %d", len(fake.submoduleUpdates))
+	}
+	if fake.submoduleUpdates[0] != result.Path {
+		t.Fatalf("expected submodule update in %s, got %s", result.Path, fake.submoduleUpdates[0])
+	}
+}
+
+func TestResolveReusedWorktreeUpdatesSubmodules(t *testing.T) {
+	projectsDir := t.TempDir()
+	repoDir := filepath.Join(projectsDir, "repo")
+	worktreePath := repoDir + "-worktrees/pr-15-feature"
+
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+
+	fake := newFakeGit()
+	fake.repos[repoDir] = &fakeRepo{
+		origin:    "https://github.com/octo/repo.git",
+		remotes:   map[string]string{"origin": "https://github.com/octo/repo.git"},
+		worktrees: map[string]string{"feature": worktreePath},
+	}
+
+	cfg := config.Config{ProjectsDir: projectsDir, TempDir: t.TempDir(), TempTTL: 24 * time.Hour}
+	pr := makePR("octo", "repo", "octo", "repo", "feature", 15)
+
+	resolver := NewResolver(fake, ResolverOptions{})
+	result, err := resolver.Resolve(context.Background(), cfg, pr, Options{Temp: false})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !result.Reused {
+		t.Fatalf("expected reuse")
+	}
+
+	// Verify submodule update was still attempted.
+	if len(fake.submoduleUpdates) != 1 {
+		t.Fatalf("expected one submodule update, got %d", len(fake.submoduleUpdates))
+	}
+	if fake.submoduleUpdates[0] != worktreePath {
+		t.Fatalf("expected submodule update in %s, got %s", worktreePath, fake.submoduleUpdates[0])
+	}
+}
+
+func TestResolveBaseBranchFetchFailureProducesWarning(t *testing.T) {
+	projectsDir := t.TempDir()
+	cfg := config.Config{ProjectsDir: projectsDir, TempDir: t.TempDir(), TempTTL: 24 * time.Hour}
+	pr := makePR("octo", "repo", "octo", "repo", "feature", 15)
+
+	fake := newFakeGit()
+	fake.fetchBranchErr = errors.New("network unreachable")
+
+	resolver := NewResolver(fake, ResolverOptions{})
+	result, err := resolver.Resolve(context.Background(), cfg, pr, Options{Temp: false})
+	if err != nil {
+		t.Fatalf("expected resolution to succeed despite fetch failure, got: %v", err)
+	}
+
+	// Verify a warning was produced.
+	if len(result.Warnings) == 0 {
+		t.Fatalf("expected at least one warning for failed base branch fetch")
+	}
+	foundBaseBranchWarning := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "base branch") {
+			foundBaseBranchWarning = true
+			break
+		}
+	}
+	if !foundBaseBranchWarning {
+		t.Fatalf("expected a warning about base branch fetch failure, got: %v", result.Warnings)
+	}
+}
+
+func TestResolveSubmoduleUpdateFailureProducesWarning(t *testing.T) {
+	projectsDir := t.TempDir()
+	cfg := config.Config{ProjectsDir: projectsDir, TempDir: t.TempDir(), TempTTL: 24 * time.Hour}
+	pr := makePR("octo", "repo", "octo", "repo", "feature", 15)
+
+	fake := newFakeGit()
+	fake.submoduleUpdateErr = errors.New("submodule init failed")
+
+	resolver := NewResolver(fake, ResolverOptions{})
+	result, err := resolver.Resolve(context.Background(), cfg, pr, Options{Temp: false})
+	if err != nil {
+		t.Fatalf("expected resolution to succeed despite submodule failure, got: %v", err)
+	}
+
+	// Verify a warning was produced.
+	if len(result.Warnings) == 0 {
+		t.Fatalf("expected at least one warning for failed submodule init")
+	}
+	foundSubmoduleWarning := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "submodule") {
+			foundSubmoduleWarning = true
+			break
+		}
+	}
+	if !foundSubmoduleWarning {
+		t.Fatalf("expected a warning about submodule init failure, got: %v", result.Warnings)
 	}
 }

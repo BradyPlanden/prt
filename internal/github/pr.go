@@ -34,6 +34,7 @@ type PRMetadata struct {
 	State    string
 	URL      string
 	HeadRef  string
+	BaseRef  string
 	BaseRepo Repository
 	HeadRepo Repository
 }
@@ -123,7 +124,7 @@ func (c *Client) FetchPRMetadata(ctx context.Context, prURL string) (PRMetadata,
 
 	args := []string{
 		"pr", "view", prURL,
-		"--json", "number,title,state,url,headRefName,headRepository,headRepositoryOwner",
+		"--json", "number,title,state,url,headRefName,baseRefName,headRepository,headRepositoryOwner",
 	}
 
 	output, err := c.runner.Run(ctx, "gh", args...)
@@ -157,6 +158,7 @@ func (c *Client) FetchPRMetadata(ctx context.Context, prURL string) (PRMetadata,
 		State:    payload.State,
 		URL:      payload.URL,
 		HeadRef:  payload.HeadRefName,
+		BaseRef:  payload.BaseRefName,
 		BaseRepo: baseRepo,
 		HeadRepo: headRepo,
 	}, nil
@@ -168,6 +170,7 @@ type ghPR struct {
 	State               string       `json:"state"`
 	URL                 string       `json:"url"`
 	HeadRefName         string       `json:"headRefName"`
+	BaseRefName         string       `json:"baseRefName"`
 	HeadRepository      *ghRepo      `json:"headRepository"`
 	HeadRepositoryOwner *ghRepoOwner `json:"headRepositoryOwner"`
 }

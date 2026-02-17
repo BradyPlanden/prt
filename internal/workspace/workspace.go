@@ -54,6 +54,8 @@ type GitClient interface {
 	Clone(ctx context.Context, url string, dest string) error
 	CloneBare(ctx context.Context, url string, dest string, depth int) error
 	Fetch(ctx context.Context, repoDir string, remote string, refspec string) error
+	FetchBranch(ctx context.Context, repoDir string, remote string, branch string) error
+	SubmoduleUpdate(ctx context.Context, repoDir string) error
 	WorktreeAdd(ctx context.Context, repoDir string, worktreePath string, branch string) error
 	WorktreeRemove(ctx context.Context, repoDir string, worktreePath string, force bool) error
 	WorktreeList(ctx context.Context, repoDir string) ([]git.Worktree, error)
@@ -96,17 +98,28 @@ func (r *Resolver) resolvePersistent(ctx context.Context, cfg config.Config, pr 
 		}
 	}
 
+	// Keep the PR's target branch up to date for accurate local diffs.
+	var warnings []string
+	if pr.BaseRef != "" {
+		if err := r.git.FetchBranch(ctx, repoDir, "origin", pr.BaseRef); err != nil {
+			// Non-fatal: stale base is inconvenient but not blocking.
+			warnings = append(warnings, fmt.Sprintf("could not fetch base branch %s (working offline?): %v", pr.BaseRef, err))
+		}
+	}
+
 	branchRef := branchRefForPR(pr)
 	if path, ok, err := r.git.HasWorktreeForBranch(ctx, repoDir, branchRef); err != nil {
 		return Result{}, err
 	} else if ok {
-		result := Result{Path: path, RepoDir: repoDir, Reused: true}
+		result := Result{Path: path, RepoDir: repoDir, Reused: true, Warnings: warnings}
 		if err := fetchPR(ctx, r.git, repoDir, pr); err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("fetch failed for existing worktree (working offline?): %v", err))
 		}
-		if err := r.ensureReadyWorktree(ctx, repoDir, path, pr); err != nil {
+		wtWarnings, err := r.ensureReadyWorktree(ctx, repoDir, path, pr)
+		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("could not update worktree tracking config: %v", err))
 		}
+		result.Warnings = append(result.Warnings, wtWarnings...)
 		r.logWarnings(result.Warnings)
 		return result, nil
 	}
@@ -138,11 +151,15 @@ func (r *Resolver) resolvePersistent(ctx context.Context, cfg config.Config, pr 
 		}
 	}
 
-	if err := r.ensureReadyWorktree(ctx, repoDir, worktreePath, pr); err != nil {
+	wtWarnings, err := r.ensureReadyWorktree(ctx, repoDir, worktreePath, pr)
+	if err != nil {
 		return Result{}, err
 	}
+	warnings = append(warnings, wtWarnings...)
 
-	return Result{Path: worktreePath, RepoDir: repoDir}, nil
+	result := Result{Path: worktreePath, RepoDir: repoDir, Warnings: warnings}
+	r.logWarnings(result.Warnings)
+	return result, nil
 }
 
 func (r *Resolver) resolveTemp(ctx context.Context, cfg config.Config, pr github.PRMetadata) (Result, error) {
@@ -163,17 +180,28 @@ func (r *Resolver) resolveTemp(ctx context.Context, cfg config.Config, pr github
 		}
 	}
 
+	// Keep the PR's target branch up to date for accurate local diffs.
+	var warnings []string
+	if pr.BaseRef != "" {
+		if err := r.git.FetchBranch(ctx, bareDir, "origin", pr.BaseRef); err != nil {
+			// Non-fatal: stale base is inconvenient but not blocking.
+			warnings = append(warnings, fmt.Sprintf("could not fetch base branch %s (working offline?): %v", pr.BaseRef, err))
+		}
+	}
+
 	branchRef := branchRefForPR(pr)
 	if path, ok, err := r.git.HasWorktreeForBranch(ctx, bareDir, branchRef); err != nil {
 		return Result{}, err
 	} else if ok {
-		result := Result{Path: path, RepoDir: bareDir, Reused: true}
+		result := Result{Path: path, RepoDir: bareDir, Reused: true, Warnings: warnings}
 		if err := fetchPR(ctx, r.git, bareDir, pr); err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("fetch failed for existing worktree (working offline?): %v", err))
 		}
-		if err := r.ensureReadyWorktree(ctx, bareDir, path, pr); err != nil {
+		wtWarnings, err := r.ensureReadyWorktree(ctx, bareDir, path, pr)
+		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("could not update worktree tracking config: %v", err))
 		}
+		result.Warnings = append(result.Warnings, wtWarnings...)
 		r.logWarnings(result.Warnings)
 		return result, nil
 	}
@@ -192,11 +220,15 @@ func (r *Resolver) resolveTemp(ctx context.Context, cfg config.Config, pr github
 		return Result{}, err
 	}
 
-	if err := r.ensureReadyWorktree(ctx, bareDir, worktreePath, pr); err != nil {
+	wtWarnings, err := r.ensureReadyWorktree(ctx, bareDir, worktreePath, pr)
+	if err != nil {
 		return Result{}, err
 	}
+	warnings = append(warnings, wtWarnings...)
 
-	return Result{Path: worktreePath, RepoDir: bareDir}, nil
+	result := Result{Path: worktreePath, RepoDir: bareDir, Warnings: warnings}
+	r.logWarnings(result.Warnings)
+	return result, nil
 }
 
 func (r *Resolver) logWarnings(warnings []string) {
@@ -208,23 +240,29 @@ func (r *Resolver) logWarnings(warnings []string) {
 	}
 }
 
-func (r *Resolver) ensureReadyWorktree(ctx context.Context, repoDir string, worktreePath string, pr github.PRMetadata) error {
+func (r *Resolver) ensureReadyWorktree(ctx context.Context, repoDir string, worktreePath string, pr github.PRMetadata) ([]string, error) {
 	branchRef := branchRefForPR(pr)
 	upstream := remoteRefForPR(pr)
 
 	if err := r.git.SetUpstream(ctx, worktreePath, branchRef, upstream); err != nil {
-		return err
+		return nil, err
 	}
-	if !isCrossRepo(pr) {
-		return nil
+	if isCrossRepo(pr) {
+		if err := r.git.ConfigSet(ctx, repoDir, "extensions.worktreeConfig", "true"); err != nil {
+			return nil, err
+		}
+		if err := r.git.ConfigSetWorktree(ctx, worktreePath, "push.default", "upstream"); err != nil {
+			return nil, err
+		}
 	}
-	if err := r.git.ConfigSet(ctx, repoDir, "extensions.worktreeConfig", "true"); err != nil {
-		return err
+
+	// Initialize submodules in the worktree (best-effort).
+	var warnings []string
+	if err := r.git.SubmoduleUpdate(ctx, worktreePath); err != nil {
+		warnings = append(warnings, fmt.Sprintf("could not initialize submodules: %v", err))
 	}
-	if err := r.git.ConfigSetWorktree(ctx, worktreePath, "push.default", "upstream"); err != nil {
-		return err
-	}
-	return nil
+
+	return warnings, nil
 }
 
 // CleanTemp removes temp worktrees in tempDir based on ttl and options.
