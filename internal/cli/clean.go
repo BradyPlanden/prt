@@ -24,7 +24,7 @@ func newCleanCommand(rootOpts *rootOptions) *cobra.Command {
 		Example: "" +
 			"  prt clean --dry-run\n" +
 			"  prt clean --all",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runClean(cmd, rootOpts, opts)
 		},
 	}

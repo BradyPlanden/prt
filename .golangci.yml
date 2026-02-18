@@ -1,0 +1,23 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - misspell
+    - revive
+  settings:
+    errcheck:
+      # Ignore unhandled errors from fmt output functions — writing to a
+      # CLI's stdout/stderr is conventional to ignore since there is no
+      # useful recovery action when terminal output fails.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+
+formatters:
+  enable:
+    - goimports

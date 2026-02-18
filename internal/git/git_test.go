@@ -53,8 +53,9 @@ func TestHasRemote(t *testing.T) {
 		output: "origin\nfork\nprt-fork\n",
 	}
 	client := &Client{runner: fakeRunner}
+	ctx := context.Background()
 
-	has, err := client.HasRemote(nil, "/repo", "origin")
+	has, err := client.HasRemote(ctx, "/repo", "origin")
 	if err != nil {
 		t.Fatalf("HasRemote: %v", err)
 	}
@@ -62,7 +63,7 @@ func TestHasRemote(t *testing.T) {
 		t.Fatalf("expected HasRemote to return true for origin")
 	}
 
-	has, err = client.HasRemote(nil, "/repo", "prt-fork")
+	has, err = client.HasRemote(ctx, "/repo", "prt-fork")
 	if err != nil {
 		t.Fatalf("HasRemote: %v", err)
 	}
@@ -70,7 +71,7 @@ func TestHasRemote(t *testing.T) {
 		t.Fatalf("expected HasRemote to return true for prt-fork")
 	}
 
-	has, err = client.HasRemote(nil, "/repo", "nonexistent")
+	has, err = client.HasRemote(ctx, "/repo", "nonexistent")
 	if err != nil {
 		t.Fatalf("HasRemote: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestRemoteURL(t *testing.T) {
 	}
 	client := &Client{runner: fakeRunner}
 
-	url, err := client.RemoteURL(nil, "/repo", "origin")
+	url, err := client.RemoteURL(context.Background(), "/repo", "origin")
 	if err != nil {
 		t.Fatalf("RemoteURL: %v", err)
 	}
@@ -131,6 +132,6 @@ type fakeRunner struct {
 	err    error
 }
 
-func (r *fakeRunner) Run(ctx context.Context, dir string, name string, args ...string) (string, error) {
+func (r *fakeRunner) Run(_ context.Context, _ string, _ string, _ ...string) (string, error) {
 	return r.output, r.err
 }

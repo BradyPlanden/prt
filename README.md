@@ -2,7 +2,7 @@
     <img src="./assets/prt-logo.png" alt="prt-logo" width="150" />
 </p>
 
-## The 'pitch'
+## The problem
 
 Reviewing a PR can require the following repetitive setup:
 

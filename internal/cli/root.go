@@ -39,7 +39,7 @@ func newRootCommand(version string) *cobra.Command {
 			"  prt https://github.com/OWNER/REPO/pull/123 --temp\n" +
 			"  prt https://github.com/OWNER/REPO/pull/123 --no-tab\n" +
 			"  prt clean --dry-run",
-		Args: func(cmd *cobra.Command, args []string) error {
+		Args: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return fmt.Errorf("missing PR URL argument (run 'prt --help')")
 			}
@@ -84,7 +84,7 @@ func newVersionCommand(version string) *cobra.Command {
 		Use:   "version",
 		Short: "Print prt version",
 		Args:  cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(cmd *cobra.Command, _ []string) {
 			fmt.Fprintf(cmd.OutOrStdout(), "prt version %s\n", version)
 		},
 	}

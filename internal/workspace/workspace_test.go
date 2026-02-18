@@ -87,12 +87,12 @@ func newFakeGit() *fakeGit {
 	}
 }
 
-func (f *fakeGit) IsGitRepo(ctx context.Context, repoDir string) (bool, error) {
+func (f *fakeGit) IsGitRepo(_ context.Context, repoDir string) (bool, error) {
 	_, ok := f.repos[repoDir]
 	return ok, nil
 }
 
-func (f *fakeGit) Clone(ctx context.Context, url string, dest string) error {
+func (f *fakeGit) Clone(_ context.Context, url string, dest string) error {
 	if err := os.MkdirAll(dest, 0o755); err != nil {
 		return err
 	}
@@ -104,26 +104,26 @@ func (f *fakeGit) Clone(ctx context.Context, url string, dest string) error {
 	return nil
 }
 
-func (f *fakeGit) CloneBare(ctx context.Context, url string, dest string, depth int) error {
+func (f *fakeGit) CloneBare(ctx context.Context, url string, dest string, _ int) error {
 	return f.Clone(ctx, url, dest)
 }
 
-func (f *fakeGit) Fetch(ctx context.Context, repoDir string, remote string, refspec string) error {
+func (f *fakeGit) Fetch(_ context.Context, repoDir string, remote string, refspec string) error {
 	f.fetches = append(f.fetches, fetchCall{repoDir: repoDir, remote: remote, refspec: refspec})
 	return f.fetchErr
 }
 
-func (f *fakeGit) FetchBranch(ctx context.Context, repoDir string, remote string, branch string) error {
+func (f *fakeGit) FetchBranch(_ context.Context, repoDir string, remote string, branch string) error {
 	f.branchFetches = append(f.branchFetches, branchFetchCall{repoDir: repoDir, remote: remote, branch: branch})
 	return f.fetchBranchErr
 }
 
-func (f *fakeGit) SubmoduleUpdate(ctx context.Context, repoDir string) error {
+func (f *fakeGit) SubmoduleUpdate(_ context.Context, repoDir string) error {
 	f.submoduleUpdates = append(f.submoduleUpdates, repoDir)
 	return f.submoduleUpdateErr
 }
 
-func (f *fakeGit) WorktreeAdd(ctx context.Context, repoDir string, worktreePath string, branch string) error {
+func (f *fakeGit) WorktreeAdd(_ context.Context, repoDir string, worktreePath string, branch string) error {
 	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
 		return err
 	}
@@ -132,7 +132,7 @@ func (f *fakeGit) WorktreeAdd(ctx context.Context, repoDir string, worktreePath 
 	return nil
 }
 
-func (f *fakeGit) WorktreeRemove(ctx context.Context, repoDir string, worktreePath string, force bool) error {
+func (f *fakeGit) WorktreeRemove(_ context.Context, repoDir string, worktreePath string, _ bool) error {
 	if err := os.RemoveAll(worktreePath); err != nil {
 		return err
 	}
@@ -145,7 +145,7 @@ func (f *fakeGit) WorktreeRemove(ctx context.Context, repoDir string, worktreePa
 	return nil
 }
 
-func (f *fakeGit) WorktreeList(ctx context.Context, repoDir string) ([]git.Worktree, error) {
+func (f *fakeGit) WorktreeList(_ context.Context, repoDir string) ([]git.Worktree, error) {
 	repo, ok := f.repos[repoDir]
 	if !ok {
 		return nil, nil
@@ -157,7 +157,7 @@ func (f *fakeGit) WorktreeList(ctx context.Context, repoDir string) ([]git.Workt
 	return worktrees, nil
 }
 
-func (f *fakeGit) HasWorktreeForBranch(ctx context.Context, repoDir string, branch string) (string, bool, error) {
+func (f *fakeGit) HasWorktreeForBranch(_ context.Context, repoDir string, branch string) (string, bool, error) {
 	if repo, ok := f.repos[repoDir]; ok {
 		if path, ok := repo.worktrees[branch]; ok {
 			return path, true, nil
@@ -166,7 +166,7 @@ func (f *fakeGit) HasWorktreeForBranch(ctx context.Context, repoDir string, bran
 	return "", false, nil
 }
 
-func (f *fakeGit) OriginURL(ctx context.Context, repoDir string) (string, error) {
+func (f *fakeGit) OriginURL(_ context.Context, repoDir string) (string, error) {
 	repo, ok := f.repos[repoDir]
 	if !ok {
 		return "", nil
@@ -174,7 +174,7 @@ func (f *fakeGit) OriginURL(ctx context.Context, repoDir string) (string, error)
 	return repo.origin, nil
 }
 
-func (f *fakeGit) AddRemote(ctx context.Context, repoDir string, name string, url string) error {
+func (f *fakeGit) AddRemote(_ context.Context, repoDir string, name string, url string) error {
 	repo, ok := f.repos[repoDir]
 	if !ok {
 		return nil
@@ -186,7 +186,7 @@ func (f *fakeGit) AddRemote(ctx context.Context, repoDir string, name string, ur
 	return nil
 }
 
-func (f *fakeGit) HasRemote(ctx context.Context, repoDir string, name string) (bool, error) {
+func (f *fakeGit) HasRemote(_ context.Context, repoDir string, name string) (bool, error) {
 	repo, ok := f.repos[repoDir]
 	if !ok {
 		return false, nil
@@ -195,22 +195,22 @@ func (f *fakeGit) HasRemote(ctx context.Context, repoDir string, name string) (b
 	return exists, nil
 }
 
-func (f *fakeGit) SetUpstream(ctx context.Context, repoDir string, branch string, upstream string) error {
+func (f *fakeGit) SetUpstream(_ context.Context, repoDir string, branch string, upstream string) error {
 	f.upstreams = append(f.upstreams, upstreamCall{repoDir: repoDir, branch: branch, upstream: upstream})
 	return nil
 }
 
-func (f *fakeGit) ConfigSet(ctx context.Context, repoDir string, key string, value string) error {
+func (f *fakeGit) ConfigSet(_ context.Context, repoDir string, key string, value string) error {
 	f.configs = append(f.configs, configCall{repoDir: repoDir, key: key, value: value})
 	return nil
 }
 
-func (f *fakeGit) ConfigSetWorktree(ctx context.Context, repoDir string, key string, value string) error {
+func (f *fakeGit) ConfigSetWorktree(_ context.Context, repoDir string, key string, value string) error {
 	f.configs = append(f.configs, configCall{repoDir: repoDir, key: "--worktree:" + key, value: value})
 	return nil
 }
 
-func (f *fakeGit) WorktreeAddBranch(ctx context.Context, repoDir string, worktreePath string, branch string, startPoint string, force bool) error {
+func (f *fakeGit) WorktreeAddBranch(_ context.Context, repoDir string, worktreePath string, branch string, startPoint string, _ bool) error {
 	if f.branchAddFirstCallErr != nil && f.branchAddCallCount == 0 {
 		f.branchAddCallCount++
 		return f.branchAddFirstCallErr
