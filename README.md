@@ -2,6 +2,10 @@
     <img src="./assets/prt-logo.png" alt="prt-logo" width="150" />
 </p>
 
+<p align="center">
+  <img src="assets/howto.gif" alt="Demo" />
+</p>
+
 ## The problem
 
 Reviewing a PR can require the following repetitive setup:
