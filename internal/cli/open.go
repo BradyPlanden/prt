@@ -19,10 +19,6 @@ func runOpen(cmd *cobra.Command, opts *rootOptions, prURL string) error {
 		return err
 	}
 
-	if _, err := github.ParsePRURL(prURL); err != nil {
-		return err
-	}
-
 	ctx, cancel := withDefaultTimeout(cmd.Context())
 	defer cancel()
 

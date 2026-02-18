@@ -102,7 +102,7 @@ Configuration precedence (lowest to highest): config file, environment variables
 
 Notes:
 
-- `PRT_TEMP_TTL` with an invalid duration is ignored; `temp_ttl` in config and `--temp-ttl` fail with an error when invalid.
+- `PRT_TEMP_TTL`, `temp_ttl` in config, and `--temp-ttl` all fail with an error when given an invalid duration.
 - `PRT_VERBOSE` accepts `1`, `true`, `yes`, or `on`.
 
 ## URL host support

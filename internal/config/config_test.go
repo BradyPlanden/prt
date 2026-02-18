@@ -83,3 +83,11 @@ func TestInvalidOverrideTTL(t *testing.T) {
 		t.Fatalf("expected error for invalid TTL")
 	}
 }
+
+func TestInvalidEnvTTL(t *testing.T) {
+	t.Setenv("PRT_TEMP_TTL", "nope")
+	_, err := Load(Overrides{})
+	if err == nil {
+		t.Fatalf("expected error for invalid PRT_TEMP_TTL")
+	}
+}

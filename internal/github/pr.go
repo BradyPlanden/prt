@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
-	"path"
 	"strconv"
 	"strings"
 )
@@ -230,10 +229,5 @@ func ensureGitSuffix(value string) string {
 	if strings.HasSuffix(value, ".git") {
 		return value
 	}
-
-	if strings.HasPrefix(value, "http") {
-		return value + ".git"
-	}
-
-	return path.Clean(value)
+	return value + ".git"
 }

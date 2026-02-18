@@ -92,6 +92,31 @@ func (r *Resolver) resolvePersistent(ctx context.Context, cfg config.Config, pr 
 		return Result{}, err
 	}
 
+	worktreePath := filepath.Join(repoDir+"-worktrees", worktreeName(pr))
+	return r.resolveWorktree(ctx, repoDir, worktreePath, pr, false)
+}
+
+func (r *Resolver) resolveTemp(ctx context.Context, cfg config.Config, pr github.PRMetadata) (Result, error) {
+	if err := os.MkdirAll(cfg.TempDir, 0o755); err != nil {
+		return Result{}, fmt.Errorf("create temp dir: %w", err)
+	}
+
+	slug := repoSlug(pr.BaseRepo)
+	bareDir := filepath.Join(cfg.TempDir, slug+".git")
+
+	if err := ensureBareRepo(ctx, r.git, bareDir, pr.BaseRepo.CloneURL); err != nil {
+		return Result{}, err
+	}
+
+	worktreePath := filepath.Join(cfg.TempDir, slug+"-"+worktreeName(pr))
+	return r.resolveWorktree(ctx, bareDir, worktreePath, pr, true)
+}
+
+// resolveWorktree handles the fetch/check/create cycle shared by persistent
+// and temp modes. repoDir is the bare or non-bare repository, worktreePath is
+// the desired worktree location, and alwaysForce skips stale-branch recovery
+// by always using -B on worktree creation (used for temp mode).
+func (r *Resolver) resolveWorktree(ctx context.Context, repoDir string, worktreePath string, pr github.PRMetadata, alwaysForce bool) (Result, error) {
 	if isCrossRepo(pr) {
 		if err := ensureRemote(ctx, r.git, repoDir, forkRemoteName(pr), pr.HeadRepo.CloneURL); err != nil {
 			return Result{}, err
@@ -128,26 +153,29 @@ func (r *Resolver) resolvePersistent(ctx context.Context, cfg config.Config, pr 
 		return Result{}, err
 	}
 
-	worktreeRoot := repoDir + "-worktrees"
-	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
 		return Result{}, fmt.Errorf("create worktree directory: %w", err)
 	}
-
-	worktreePath := filepath.Join(worktreeRoot, worktreeName(pr))
 	if pathExists(worktreePath) {
 		return Result{}, fmt.Errorf("worktree path already exists: %s", worktreePath)
 	}
 
 	startPoint := remoteRefForPR(pr)
-	if err := r.git.WorktreeAddBranch(ctx, repoDir, worktreePath, branchRef, startPoint, false); err != nil {
-		if !errors.Is(err, git.ErrBranchExists) {
-			return Result{}, err
-		}
-		// Branch exists as a stale leftover (e.g. after manual worktree
-		// cleanup). Since HasWorktreeForBranch already confirmed no worktree
-		// is using it, force-reset the branch with -B.
+	if alwaysForce {
 		if err := r.git.WorktreeAddBranch(ctx, repoDir, worktreePath, branchRef, startPoint, true); err != nil {
 			return Result{}, err
+		}
+	} else {
+		if err := r.git.WorktreeAddBranch(ctx, repoDir, worktreePath, branchRef, startPoint, false); err != nil {
+			if !errors.Is(err, git.ErrBranchExists) {
+				return Result{}, err
+			}
+			// Branch exists as a stale leftover (e.g. after manual worktree
+			// cleanup). Since HasWorktreeForBranch already confirmed no worktree
+			// is using it, force-reset the branch with -B.
+			if err := r.git.WorktreeAddBranch(ctx, repoDir, worktreePath, branchRef, startPoint, true); err != nil {
+				return Result{}, err
+			}
 		}
 	}
 
@@ -158,75 +186,6 @@ func (r *Resolver) resolvePersistent(ctx context.Context, cfg config.Config, pr 
 	warnings = append(warnings, wtWarnings...)
 
 	result := Result{Path: worktreePath, RepoDir: repoDir, Warnings: warnings}
-	r.logWarnings(result.Warnings)
-	return result, nil
-}
-
-func (r *Resolver) resolveTemp(ctx context.Context, cfg config.Config, pr github.PRMetadata) (Result, error) {
-	if err := os.MkdirAll(cfg.TempDir, 0o755); err != nil {
-		return Result{}, fmt.Errorf("create temp dir: %w", err)
-	}
-
-	repoSlug := repoSlug(pr.BaseRepo)
-	bareDir := filepath.Join(cfg.TempDir, repoSlug+".git")
-
-	if err := ensureBareRepo(ctx, r.git, bareDir, pr.BaseRepo.CloneURL); err != nil {
-		return Result{}, err
-	}
-
-	if isCrossRepo(pr) {
-		if err := ensureRemote(ctx, r.git, bareDir, forkRemoteName(pr), pr.HeadRepo.CloneURL); err != nil {
-			return Result{}, err
-		}
-	}
-
-	// Keep the PR's target branch up to date for accurate local diffs.
-	var warnings []string
-	if pr.BaseRef != "" {
-		if err := r.git.FetchBranch(ctx, bareDir, "origin", pr.BaseRef); err != nil {
-			// Non-fatal: stale base is inconvenient but not blocking.
-			warnings = append(warnings, fmt.Sprintf("could not fetch base branch %s (working offline?): %v", pr.BaseRef, err))
-		}
-	}
-
-	branchRef := branchRefForPR(pr)
-	if path, ok, err := r.git.HasWorktreeForBranch(ctx, bareDir, branchRef); err != nil {
-		return Result{}, err
-	} else if ok {
-		result := Result{Path: path, RepoDir: bareDir, Reused: true, Warnings: warnings}
-		if err := fetchPR(ctx, r.git, bareDir, pr); err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("fetch failed for existing worktree (working offline?): %v", err))
-		}
-		wtWarnings, err := r.ensureReadyWorktree(ctx, bareDir, path, pr)
-		if err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("could not update worktree tracking config: %v", err))
-		}
-		result.Warnings = append(result.Warnings, wtWarnings...)
-		r.logWarnings(result.Warnings)
-		return result, nil
-	}
-
-	if err := fetchPR(ctx, r.git, bareDir, pr); err != nil {
-		return Result{}, err
-	}
-
-	worktreePath := filepath.Join(cfg.TempDir, repoSlug+"-"+worktreeName(pr))
-	if pathExists(worktreePath) {
-		return Result{}, fmt.Errorf("worktree path already exists: %s", worktreePath)
-	}
-
-	startPoint := remoteRefForPR(pr)
-	if err := r.git.WorktreeAddBranch(ctx, bareDir, worktreePath, branchRef, startPoint, true); err != nil {
-		return Result{}, err
-	}
-
-	wtWarnings, err := r.ensureReadyWorktree(ctx, bareDir, worktreePath, pr)
-	if err != nil {
-		return Result{}, err
-	}
-	warnings = append(warnings, wtWarnings...)
-
-	result := Result{Path: worktreePath, RepoDir: bareDir, Warnings: warnings}
 	r.logWarnings(result.Warnings)
 	return result, nil
 }
@@ -495,12 +454,7 @@ func ensureRemote(ctx context.Context, client GitClient, repoDir string, name st
 }
 
 func repoMatchesOrigin(origin string, repo github.Repository) bool {
-	origin = strings.ToLower(origin)
-	repoName := strings.ToLower(fmt.Sprintf("%s/%s", repo.Owner, repo.Name))
-
-	if strings.Contains(origin, repoName) {
-		return true
-	}
-
-	return false
+	origin = strings.ToLower(strings.TrimSuffix(origin, ".git"))
+	repoPath := strings.ToLower(fmt.Sprintf("%s/%s", repo.Owner, repo.Name))
+	return strings.HasSuffix(origin, "/"+repoPath) || strings.HasSuffix(origin, ":"+repoPath)
 }

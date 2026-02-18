@@ -69,7 +69,9 @@ func Load(overrides Overrides) (Config, error) {
 		return Config{}, err
 	}
 
-	applyEnv(&cfg)
+	if err := applyEnv(&cfg); err != nil {
+		return Config{}, err
+	}
 	if err := applyOverrides(&cfg, overrides); err != nil {
 		return Config{}, err
 	}
@@ -115,7 +117,7 @@ func applyFileConfig(cfg *Config, path string) error {
 	return nil
 }
 
-func applyEnv(cfg *Config) {
+func applyEnv(cfg *Config) error {
 	if value := os.Getenv("PRT_PROJECTS_DIR"); value != "" {
 		cfg.ProjectsDir = value
 	}
@@ -123,9 +125,11 @@ func applyEnv(cfg *Config) {
 		cfg.TempDir = value
 	}
 	if value := os.Getenv("PRT_TEMP_TTL"); value != "" {
-		if parsed, err := time.ParseDuration(value); err == nil {
-			cfg.TempTTL = parsed
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid PRT_TEMP_TTL: %w", err)
 		}
+		cfg.TempTTL = parsed
 	}
 	if value := os.Getenv("PRT_TERMINAL"); value != "" {
 		cfg.Terminal = value
@@ -133,6 +137,7 @@ func applyEnv(cfg *Config) {
 	if value := os.Getenv("PRT_VERBOSE"); value != "" {
 		cfg.Verbose = parseBool(value)
 	}
+	return nil
 }
 
 func applyOverrides(cfg *Config, overrides Overrides) error {

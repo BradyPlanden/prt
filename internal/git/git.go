@@ -116,11 +116,7 @@ func (c *Client) Fetch(ctx context.Context, repoDir string, remote string, refsp
 
 // FetchBranch fetches a single branch from remote into repoDir.
 func (c *Client) FetchBranch(ctx context.Context, repoDir string, remote string, branch string) error {
-	_, err := c.runner.Run(ctx, repoDir, "git", "fetch", remote, branch)
-	if err != nil {
-		return fmt.Errorf("git fetch branch failed: %w", err)
-	}
-	return nil
+	return c.Fetch(ctx, repoDir, remote, branch)
 }
 
 // SubmoduleUpdate initializes and updates submodules recursively in repoDir.
