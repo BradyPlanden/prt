@@ -174,6 +174,17 @@ func (f *fakeGit) OriginURL(_ context.Context, repoDir string) (string, error) {
 	return repo.origin, nil
 }
 
+func (f *fakeGit) RemoteURL(_ context.Context, repoDir string, name string) (string, error) {
+	repo, ok := f.repos[repoDir]
+	if !ok {
+		return "", nil
+	}
+	if name == "origin" {
+		return repo.origin, nil
+	}
+	return repo.remotes[name], nil
+}
+
 func (f *fakeGit) AddRemote(_ context.Context, repoDir string, name string, url string) error {
 	repo, ok := f.repos[repoDir]
 	if !ok {
@@ -183,6 +194,9 @@ func (f *fakeGit) AddRemote(_ context.Context, repoDir string, name string, url 
 		repo.remotes = make(map[string]string)
 	}
 	repo.remotes[name] = url
+	if name == "origin" {
+		repo.origin = url
+	}
 	return nil
 }
 
@@ -711,6 +725,27 @@ func TestEnsureRemotePreservesExistingURL(t *testing.T) {
 	}
 }
 
+func TestEnsureRemoteRejectsMismatchedURL(t *testing.T) {
+	projectsDir := t.TempDir()
+	repoDir := filepath.Join(projectsDir, "repo")
+
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+
+	fake := newFakeGit()
+	fake.repos[repoDir] = &fakeRepo{
+		origin:    "https://github.com/octo/repo.git",
+		remotes:   map[string]string{"prt/fork/repo-repo": "git@github.com:someone/else.git"},
+		worktrees: map[string]string{},
+	}
+
+	err := ensureRemote(context.Background(), fake, repoDir, "prt/fork/repo-repo", "https://github.com/fork/repo.git")
+	if err == nil {
+		t.Fatalf("expected mismatched remote URL to fail")
+	}
+}
+
 func TestResolveRepoDir_NoOrigin_UsesAlternate(t *testing.T) {
 	projectsDir := t.TempDir()
 	repoDir := filepath.Join(projectsDir, "repo")
@@ -1058,5 +1093,47 @@ func TestResolveSubmoduleUpdateFailureProducesWarning(t *testing.T) {
 	}
 	if !foundSubmoduleWarning {
 		t.Fatalf("expected a warning about submodule init failure, got: %v", result.Warnings)
+	}
+}
+
+func TestEnsureRepoRejectsMismatchedOrigin(t *testing.T) {
+	projectsDir := t.TempDir()
+	repoDir := filepath.Join(projectsDir, "repo")
+
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("mkdir repo: %v", err)
+	}
+
+	fake := newFakeGit()
+	fake.repos[repoDir] = &fakeRepo{
+		origin:    "https://github.com/other/repo.git",
+		remotes:   map[string]string{"origin": "https://github.com/other/repo.git"},
+		worktrees: map[string]string{},
+	}
+
+	err := ensureRepo(context.Background(), fake, repoDir, "https://github.com/octo/repo.git")
+	if err == nil {
+		t.Fatalf("expected mismatched origin to fail")
+	}
+}
+
+func TestEnsureBareRepoRejectsMismatchedOrigin(t *testing.T) {
+	tempDir := t.TempDir()
+	bareDir := filepath.Join(tempDir, "octo-repo.git")
+
+	if err := os.MkdirAll(bareDir, 0o755); err != nil {
+		t.Fatalf("mkdir bare: %v", err)
+	}
+
+	fake := newFakeGit()
+	fake.repos[bareDir] = &fakeRepo{
+		origin:    "https://github.com/other/repo.git",
+		remotes:   map[string]string{"origin": "https://github.com/other/repo.git"},
+		worktrees: map[string]string{},
+	}
+
+	err := ensureBareRepo(context.Background(), fake, bareDir, "https://github.com/octo/repo.git")
+	if err == nil {
+		t.Fatalf("expected mismatched bare origin to fail")
 	}
 }

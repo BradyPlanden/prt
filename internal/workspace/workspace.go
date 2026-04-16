@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,6 +62,7 @@ type GitClient interface {
 	WorktreeList(ctx context.Context, repoDir string) ([]git.Worktree, error)
 	HasWorktreeForBranch(ctx context.Context, repoDir string, branch string) (string, bool, error)
 	OriginURL(ctx context.Context, repoDir string) (string, error)
+	RemoteURL(ctx context.Context, repoDir string, name string) (string, error)
 	AddRemote(ctx context.Context, repoDir string, name string, url string) error
 	HasRemote(ctx context.Context, repoDir string, name string) (bool, error)
 	SetUpstream(ctx context.Context, repoDir string, branch string, upstream string) error
@@ -357,6 +359,13 @@ func ensureRepo(ctx context.Context, client GitClient, repoDir string, cloneURL 
 	if !hasOrigin {
 		return client.AddRemote(ctx, repoDir, "origin", cloneURL)
 	}
+	originURL, err := client.OriginURL(ctx, repoDir)
+	if err != nil {
+		return err
+	}
+	if !remotesMatchRepo(originURL, cloneURL) {
+		return fmt.Errorf("existing origin %q does not match expected repository %q", originURL, cloneURL)
+	}
 
 	return nil
 }
@@ -373,6 +382,24 @@ func ensureBareRepo(ctx context.Context, client GitClient, bareDir string, clone
 		}
 		if !isRepo {
 			return fmt.Errorf("path is not a git repository: %s", bareDir)
+		}
+	}
+
+	hasOrigin, err := client.HasRemote(ctx, bareDir, "origin")
+	if err != nil {
+		return err
+	}
+	if !hasOrigin {
+		if err := client.AddRemote(ctx, bareDir, "origin", cloneURL); err != nil {
+			return err
+		}
+	} else {
+		originURL, err := client.OriginURL(ctx, bareDir)
+		if err != nil {
+			return err
+		}
+		if !remotesMatchRepo(originURL, cloneURL) {
+			return fmt.Errorf("existing origin %q does not match expected repository %q", originURL, cloneURL)
 		}
 	}
 
@@ -448,13 +475,45 @@ func ensureRemote(ctx context.Context, client GitClient, repoDir string, name st
 	if !hasRemote {
 		return client.AddRemote(ctx, repoDir, name, url)
 	}
+	existingURL, err := client.RemoteURL(ctx, repoDir, name)
+	if err != nil {
+		return err
+	}
+	if !remotesMatchRepo(existingURL, url) {
+		return fmt.Errorf("existing remote %q points to %q, expected %q", name, existingURL, url)
+	}
 	// Preserve existing URL — user may have SSH, insteadOf rewrites, or
 	// other auth customizations that differ from the GitHub API CloneURL.
 	return nil
 }
 
 func repoMatchesOrigin(origin string, repo github.Repository) bool {
-	origin = strings.ToLower(strings.TrimSuffix(origin, ".git"))
 	repoPath := strings.ToLower(fmt.Sprintf("%s/%s", repo.Owner, repo.Name))
-	return strings.HasSuffix(origin, "/"+repoPath) || strings.HasSuffix(origin, ":"+repoPath)
+	return repoPathFromRemote(origin) == repoPath
+}
+
+func remotesMatchRepo(remoteURL string, expectedURL string) bool {
+	remoteRepo := repoPathFromRemote(remoteURL)
+	expectedRepo := repoPathFromRemote(expectedURL)
+	return remoteRepo != "" && remoteRepo == expectedRepo
+}
+
+func repoPathFromRemote(remote string) string {
+	remote = strings.TrimSpace(strings.ToLower(remote))
+	remote = strings.TrimSuffix(remote, ".git")
+	if remote == "" {
+		return ""
+	}
+	if strings.HasPrefix(remote, "ssh://") || strings.HasPrefix(remote, "http://") || strings.HasPrefix(remote, "https://") {
+		if parsed, err := url.Parse(remote); err == nil {
+			return strings.TrimPrefix(parsed.Path, "/")
+		}
+	}
+	if idx := strings.Index(remote, ":"); idx >= 0 {
+		return strings.TrimPrefix(remote[idx+1:], "/")
+	}
+	if idx := strings.Index(remote, "/"); idx >= 0 {
+		return strings.TrimPrefix(remote[idx:], "/")
+	}
+	return ""
 }
