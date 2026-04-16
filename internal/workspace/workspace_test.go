@@ -18,6 +18,7 @@ import (
 type fakeGit struct {
 	repos                 map[string]*fakeRepo
 	fetches               []fetchCall
+	fetchErrs             []error
 	branchFetches         []branchFetchCall
 	submoduleUpdates      []string
 	adds                  []addCall
@@ -113,6 +114,11 @@ func (f *fakeGit) CloneBare(ctx context.Context, url string, dest string, _ int)
 
 func (f *fakeGit) Fetch(_ context.Context, repoDir string, remote string, refspec string) error {
 	f.fetches = append(f.fetches, fetchCall{repoDir: repoDir, remote: remote, refspec: refspec})
+	if len(f.fetchErrs) > 0 {
+		err := f.fetchErrs[0]
+		f.fetchErrs = f.fetchErrs[1:]
+		return err
+	}
 	return f.fetchErr
 }
 
@@ -1328,5 +1334,40 @@ func TestEnsureBareRepoRejectsMismatchedOrigin(t *testing.T) {
 	err := ensureBareRepo(context.Background(), fake, bareDir, "https://github.com/octo/repo.git")
 	if err == nil {
 		t.Fatalf("expected mismatched bare origin to fail")
+	}
+}
+
+func TestResolveMergedPRFallsBackToPullRef(t *testing.T) {
+	projectsDir := t.TempDir()
+	cfg := config.Config{ProjectsDir: projectsDir, TempDir: t.TempDir(), TempTTL: 24 * time.Hour}
+	pr := makePR("octo", "repo", "octo", "repo", "feature", 15)
+	pr.State = "MERGED"
+
+	fake := newFakeGit()
+	fake.fetchErrs = []error{errors.New("couldn't find remote ref feature"), nil}
+	resolver := NewResolver(fake, ResolverOptions{})
+
+	result, err := resolver.Resolve(context.Background(), cfg, pr, Options{Temp: false})
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+
+	if len(fake.fetches) != 2 {
+		t.Fatalf("expected direct fetch and pull-ref fallback, got %d fetches", len(fake.fetches))
+	}
+	if fake.fetches[1].refspec != "+refs/pull/15/head:refs/remotes/origin/prt/pull/15/head" {
+		t.Fatalf("unexpected fallback refspec: %s", fake.fetches[1].refspec)
+	}
+	if len(fake.branchAdds) != 1 {
+		t.Fatalf("expected one worktree add, got %d", len(fake.branchAdds))
+	}
+	if fake.branchAdds[0].startPoint != "origin/prt/pull/15/head" {
+		t.Fatalf("expected pull-ref start point, got %s", fake.branchAdds[0].startPoint)
+	}
+	if len(fake.upstreams) != 0 {
+		t.Fatalf("expected no upstream to be configured for pull-ref fallback, got %v", fake.upstreams)
+	}
+	if result.Path == "" {
+		t.Fatalf("expected a resolved worktree path")
 	}
 }

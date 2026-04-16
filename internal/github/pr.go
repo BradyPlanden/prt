@@ -36,6 +36,9 @@ type PRMetadata struct {
 	BaseRef  string
 	BaseRepo Repository
 	HeadRepo Repository
+	// HeadRepoMissing indicates the PR head repository is unavailable and
+	// callers should avoid assuming the live branch can still be fetched.
+	HeadRepoMissing bool
 }
 
 // Client fetches pull request metadata via the gh CLI.
@@ -146,7 +149,7 @@ func (c *Client) FetchPRMetadata(ctx context.Context, prURL string) (PRMetadata,
 		CloneURL: fmt.Sprintf("https://github.com/%s/%s.git", ref.Owner, ref.Repo),
 	}
 
-	headRepo, err := repoFromHeadPayload(payload.HeadRepository, payload.HeadRepositoryOwner)
+	headRepo, headRepoMissing, err := repoFromHeadPayload(payload.HeadRepository, payload.HeadRepositoryOwner, ref)
 	if err != nil {
 		return PRMetadata{}, fmt.Errorf("head repository: %w", err)
 	}
@@ -160,6 +163,7 @@ func (c *Client) FetchPRMetadata(ctx context.Context, prURL string) (PRMetadata,
 		BaseRef:  payload.BaseRefName,
 		BaseRepo: baseRepo,
 		HeadRepo: headRepo,
+		HeadRepoMissing: headRepoMissing,
 	}, nil
 }
 
@@ -188,9 +192,16 @@ type ghRepoOwner struct {
 	Name  string `json:"name"`
 }
 
-func repoFromHeadPayload(repo *ghRepo, owner *ghRepoOwner) (Repository, error) {
+func repoFromHeadPayload(repo *ghRepo, owner *ghRepoOwner, ref PRRef) (Repository, bool, error) {
 	if repo == nil {
-		return Repository{}, errors.New("repository not found")
+		fallbackOwner := ref.Owner
+		if owner != nil && owner.Login != "" {
+			fallbackOwner = owner.Login
+		}
+		return Repository{
+			Owner: fallbackOwner,
+			Name:  ref.Repo,
+		}, true, nil
 	}
 
 	ownerLogin := repo.Owner.Login
@@ -208,7 +219,7 @@ func repoFromHeadPayload(repo *ghRepo, owner *ghRepoOwner) (Repository, error) {
 		}
 	}
 	if ownerLogin == "" || name == "" {
-		return Repository{}, errors.New("missing repository owner or name")
+		return Repository{}, false, errors.New("missing repository owner or name")
 	}
 
 	cloneURL := repo.URL
@@ -222,7 +233,7 @@ func repoFromHeadPayload(repo *ghRepo, owner *ghRepoOwner) (Repository, error) {
 		Name:     name,
 		URL:      repo.URL,
 		CloneURL: cloneURL,
-	}, nil
+	}, false, nil
 }
 
 func ensureGitSuffix(value string) string {

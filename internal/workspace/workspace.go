@@ -143,7 +143,7 @@ func (r *Resolver) resolveTemp(ctx context.Context, cfg config.Config, pr github
 // the desired worktree location, and alwaysForce skips stale-branch recovery
 // by always using -B on worktree creation (used for temp mode).
 func (r *Resolver) resolveWorktree(ctx context.Context, repoDir string, worktreePath string, pr github.PRMetadata, alwaysForce bool) (Result, error) {
-	if isCrossRepo(pr) {
+	if canUseHeadRemote(pr) && isCrossRepo(pr) {
 		if err := ensureRemote(ctx, r.git, repoDir, forkRemoteName(pr), pr.HeadRepo.CloneURL); err != nil {
 			return Result{}, err
 		}
@@ -163,10 +163,11 @@ func (r *Resolver) resolveWorktree(ctx context.Context, repoDir string, worktree
 		return Result{}, err
 	} else if ok {
 		result := Result{Path: path, RepoDir: repoDir, Reused: true, Warnings: warnings}
-		if err := fetchPR(ctx, r.git, repoDir, pr); err != nil {
+		target, err := fetchPR(ctx, r.git, repoDir, pr)
+		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("fetch failed for existing worktree (working offline?): %v", err))
 		}
-		wtWarnings, err := r.ensureReadyWorktree(ctx, repoDir, path, pr)
+		wtWarnings, err := r.ensureReadyWorktree(ctx, repoDir, path, pr, target)
 		if err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("could not update worktree tracking config: %v", err))
 		}
@@ -175,7 +176,8 @@ func (r *Resolver) resolveWorktree(ctx context.Context, repoDir string, worktree
 		return result, nil
 	}
 
-	if err := fetchPR(ctx, r.git, repoDir, pr); err != nil {
+	target, err := fetchPR(ctx, r.git, repoDir, pr)
+	if err != nil {
 		return Result{}, err
 	}
 
@@ -186,7 +188,7 @@ func (r *Resolver) resolveWorktree(ctx context.Context, repoDir string, worktree
 		return Result{}, fmt.Errorf("worktree path already exists: %s", worktreePath)
 	}
 
-	startPoint := remoteRefForPR(pr)
+	startPoint := target.StartPoint
 	if alwaysForce {
 		if err := r.git.WorktreeAddBranch(ctx, repoDir, worktreePath, branchRef, startPoint, true); err != nil {
 			return Result{}, err
@@ -205,7 +207,7 @@ func (r *Resolver) resolveWorktree(ctx context.Context, repoDir string, worktree
 		}
 	}
 
-	wtWarnings, err := r.ensureReadyWorktree(ctx, repoDir, worktreePath, pr)
+	wtWarnings, err := r.ensureReadyWorktree(ctx, repoDir, worktreePath, pr, target)
 	if err != nil {
 		return Result{}, err
 	}
@@ -225,14 +227,15 @@ func (r *Resolver) logWarnings(warnings []string) {
 	}
 }
 
-func (r *Resolver) ensureReadyWorktree(ctx context.Context, repoDir string, worktreePath string, pr github.PRMetadata) ([]string, error) {
+func (r *Resolver) ensureReadyWorktree(ctx context.Context, repoDir string, worktreePath string, pr github.PRMetadata, target prCheckoutTarget) ([]string, error) {
 	branchRef := branchRefForPR(pr)
-	upstream := remoteRefForPR(pr)
 
-	if err := r.git.SetUpstream(ctx, worktreePath, branchRef, upstream); err != nil {
-		return nil, err
+	if target.Upstream != "" {
+		if err := r.git.SetUpstream(ctx, worktreePath, branchRef, target.Upstream); err != nil {
+			return nil, err
+		}
 	}
-	if isCrossRepo(pr) {
+	if isCrossRepo(pr) && !target.IsPullRef {
 		if err := r.git.ConfigSet(ctx, repoDir, "extensions.worktreeConfig", "true"); err != nil {
 			return nil, err
 		}
@@ -370,10 +373,6 @@ func (r *Resolver) cleanBareRepo(ctx context.Context, bareDir string, ttl time.D
 		}
 	}
 
-	if dryRun {
-		return nil
-	}
-
 	remaining := 0
 	for _, wt := range worktrees {
 		if wt.Path == bareDir {
@@ -383,6 +382,10 @@ func (r *Resolver) cleanBareRepo(ctx context.Context, bareDir string, ttl time.D
 			continue
 		}
 		remaining++
+	}
+
+	if dryRun {
+		return nil
 	}
 
 	if remaining == 0 {
@@ -495,19 +498,19 @@ func ensureBareRepo(ctx context.Context, client GitClient, bareDir string, clone
 	return client.ConfigSet(ctx, bareDir, "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
 }
 
-func fetchPR(ctx context.Context, client GitClient, repoDir string, pr github.PRMetadata) error {
-	var remote string
-	var refspec string
-
-	if isCrossRepo(pr) {
-		remote = forkRemoteName(pr)
-		refspec = fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", pr.HeadRef, remote, pr.HeadRef)
+func fetchPR(ctx context.Context, client GitClient, repoDir string, pr github.PRMetadata) (prCheckoutTarget, error) {
+	target := primaryCheckoutTarget(pr)
+	if err := client.Fetch(ctx, repoDir, target.Remote, target.Refspec); err == nil {
+		return target, nil
+	} else if !shouldFallbackToPullRef(pr, target) {
+		return target, err
 	} else {
-		remote = "origin"
-		refspec = fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", pr.HeadRef, pr.HeadRef)
+		fallback := pullRefCheckoutTarget(pr)
+		if fallbackErr := client.Fetch(ctx, repoDir, fallback.Remote, fallback.Refspec); fallbackErr != nil {
+			return target, fmt.Errorf("direct fetch failed: %w; fallback pull ref fetch failed: %v", err, fallbackErr)
+		}
+		return fallback, nil
 	}
-
-	return client.Fetch(ctx, repoDir, remote, refspec)
 }
 
 func branchRefForPR(pr github.PRMetadata) string {
@@ -515,13 +518,6 @@ func branchRefForPR(pr github.PRMetadata) string {
 		return fmt.Sprintf("pr/%d/%s", pr.Number, pr.HeadRef)
 	}
 	return pr.HeadRef
-}
-
-func remoteRefForPR(pr github.PRMetadata) string {
-	if isCrossRepo(pr) {
-		return fmt.Sprintf("%s/%s", forkRemoteName(pr), pr.HeadRef)
-	}
-	return fmt.Sprintf("origin/%s", pr.HeadRef)
 }
 
 func worktreeName(pr github.PRMetadata) string {
@@ -550,6 +546,10 @@ func pathExists(path string) bool {
 
 func isCrossRepo(pr github.PRMetadata) bool {
 	return !strings.EqualFold(pr.BaseRepo.Owner, pr.HeadRepo.Owner) || !strings.EqualFold(pr.BaseRepo.Name, pr.HeadRepo.Name)
+}
+
+func canUseHeadRemote(pr github.PRMetadata) bool {
+	return !pr.HeadRepoMissing && pr.HeadRepo.CloneURL != ""
 }
 
 func forkRemoteName(pr github.PRMetadata) string {
@@ -605,6 +605,57 @@ func repoPathFromRemote(remote string) string {
 		return strings.TrimPrefix(remote[idx:], "/")
 	}
 	return ""
+}
+
+type prCheckoutTarget struct {
+	Remote    string
+	Refspec   string
+	StartPoint string
+	Upstream  string
+	IsPullRef bool
+}
+
+func primaryCheckoutTarget(pr github.PRMetadata) prCheckoutTarget {
+	if pr.HeadRepoMissing {
+		return pullRefCheckoutTarget(pr)
+	}
+	if isCrossRepo(pr) {
+		remote := forkRemoteName(pr)
+		upstream := fmt.Sprintf("%s/%s", remote, pr.HeadRef)
+		return prCheckoutTarget{
+			Remote:     remote,
+			Refspec:    fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", pr.HeadRef, remote, pr.HeadRef),
+			StartPoint: upstream,
+			Upstream:   upstream,
+		}
+	}
+	upstream := fmt.Sprintf("origin/%s", pr.HeadRef)
+	return prCheckoutTarget{
+		Remote:     "origin",
+		Refspec:    fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", pr.HeadRef, pr.HeadRef),
+		StartPoint: upstream,
+		Upstream:   upstream,
+	}
+}
+
+func pullRefCheckoutTarget(pr github.PRMetadata) prCheckoutTarget {
+	remoteRef := fmt.Sprintf("origin/prt/pull/%d/head", pr.Number)
+	return prCheckoutTarget{
+		Remote:     "origin",
+		Refspec:    fmt.Sprintf("+refs/pull/%d/head:refs/remotes/%s", pr.Number, remoteRef),
+		StartPoint: remoteRef,
+		IsPullRef:  true,
+	}
+}
+
+func shouldFallbackToPullRef(pr github.PRMetadata, target prCheckoutTarget) bool {
+	if target.IsPullRef {
+		return false
+	}
+	if pr.HeadRepoMissing {
+		return true
+	}
+	return strings.EqualFold(pr.State, "closed") || strings.EqualFold(pr.State, "merged")
 }
 
 func tempWorktreeMarkerPath(tempDir string, worktreePath string) string {

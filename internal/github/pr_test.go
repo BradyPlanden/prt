@@ -1,6 +1,10 @@
 package github
 
-import "testing"
+import (
+	"context"
+	"fmt"
+	"testing"
+)
 
 func TestParsePRURL(t *testing.T) {
 	cases := []struct {
@@ -60,5 +64,67 @@ func TestParsePRURL(t *testing.T) {
 				t.Fatalf("expected error for %s", tc.input)
 			}
 		})
+	}
+}
+
+type metadataRunner struct {
+	output string
+	err    error
+}
+
+func (r metadataRunner) Run(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return []byte(r.output), r.err
+}
+
+func TestFetchPRMetadataAllowsMissingHeadRepository(t *testing.T) {
+	output := `{
+		"number": 15,
+		"title": "Fix it",
+		"state": "MERGED",
+		"url": "https://github.com/octo/repo/pull/15",
+		"headRefName": "feature",
+		"baseRefName": "main",
+		"headRepository": null,
+		"headRepositoryOwner": {"login": "forker", "name": "Forker"}
+	}`
+	client := NewClient(ClientOptions{Runner: metadataRunner{output: output}})
+
+	meta, err := client.FetchPRMetadata(context.Background(), "https://github.com/octo/repo/pull/15")
+	if err != nil {
+		t.Fatalf("FetchPRMetadata: %v", err)
+	}
+	if !meta.HeadRepoMissing {
+		t.Fatalf("expected missing head repository to be recorded")
+	}
+	if meta.HeadRepo.Owner != "forker" {
+		t.Fatalf("expected fallback head owner forker, got %s", meta.HeadRepo.Owner)
+	}
+	if meta.HeadRepo.Name != "repo" {
+		t.Fatalf("expected fallback head repo name repo, got %s", meta.HeadRepo.Name)
+	}
+	if meta.HeadRepo.CloneURL != "" {
+		t.Fatalf("expected no clone URL for missing head repository, got %s", meta.HeadRepo.CloneURL)
+	}
+}
+
+func TestFetchPRMetadataRejectsMalformedHeadRepository(t *testing.T) {
+	output := `{
+		"number": 15,
+		"title": "Fix it",
+		"state": "OPEN",
+		"url": "https://github.com/octo/repo/pull/15",
+		"headRefName": "feature",
+		"baseRefName": "main",
+		"headRepository": {"name": "", "nameWithOwner": "", "url": "", "owner": {"login": ""}},
+		"headRepositoryOwner": null
+	}`
+	client := NewClient(ClientOptions{Runner: metadataRunner{output: output}})
+
+	_, err := client.FetchPRMetadata(context.Background(), "https://github.com/octo/repo/pull/15")
+	if err == nil {
+		t.Fatal("expected malformed head repository metadata to fail")
+	}
+	if got := err.Error(); got == "" || got == fmt.Sprint(nil) {
+		t.Fatalf("expected descriptive error, got %q", got)
 	}
 }
