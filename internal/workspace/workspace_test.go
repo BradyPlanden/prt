@@ -24,6 +24,8 @@ type fakeGit struct {
 	upstreams             []upstreamCall
 	configs               []configCall
 	branchAdds            []branchAddCall
+	prunes                []string
+	dirtyWorktrees        map[string]bool
 	fetchErr              error
 	branchAddFirstCallErr error
 	branchAddCallCount    int
@@ -84,6 +86,7 @@ func newFakeGit() *fakeGit {
 		upstreams:        []upstreamCall{},
 		configs:          []configCall{},
 		branchAdds:       []branchAddCall{},
+		dirtyWorktrees:   map[string]bool{},
 	}
 }
 
@@ -224,6 +227,21 @@ func (f *fakeGit) ConfigSetWorktree(_ context.Context, repoDir string, key strin
 	return nil
 }
 
+func (f *fakeGit) IsWorktreeDirty(_ context.Context, repoDir string) (bool, error) {
+	return f.dirtyWorktrees[repoDir], nil
+}
+
+func (f *fakeGit) WorktreePrune(_ context.Context, repoDir string) error {
+	f.prunes = append(f.prunes, repoDir)
+	repo := f.repos[repoDir]
+	for branch, path := range repo.worktrees {
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			delete(repo.worktrees, branch)
+		}
+	}
+	return nil
+}
+
 func (f *fakeGit) WorktreeAddBranch(_ context.Context, repoDir string, worktreePath string, branch string, startPoint string, _ bool) error {
 	if f.branchAddFirstCallErr != nil && f.branchAddCallCount == 0 {
 		f.branchAddCallCount++
@@ -236,6 +254,24 @@ func (f *fakeGit) WorktreeAddBranch(_ context.Context, repoDir string, worktreeP
 	f.repos[repoDir].worktrees[branch] = worktreePath
 	f.branchAdds = append(f.branchAdds, branchAddCall{repoDir: repoDir, path: worktreePath, branch: branch, startPoint: startPoint})
 	return nil
+}
+
+func setTempWorktreeMarkerTime(t *testing.T, tempDir string, worktreePath string, when time.Time) {
+	t.Helper()
+	path := tempWorktreeMarkerPath(tempDir, worktreePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir usage marker dir: %v", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		t.Fatalf("open usage marker: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close usage marker: %v", err)
+	}
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatalf("chtimes usage marker: %v", err)
+	}
 }
 
 func TestResolvePersistentCloneAndWorktree(t *testing.T) {
@@ -533,9 +569,8 @@ func TestCleanTempRemovesOldWorktree(t *testing.T) {
 	}
 
 	oldTime := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(worktreeOld, oldTime, oldTime); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
+	setTempWorktreeMarkerTime(t, tempDir, worktreeOld, oldTime)
+	setTempWorktreeMarkerTime(t, tempDir, worktreeNew, time.Now())
 
 	fake := newFakeGit()
 	fake.repos[bareDir] = &fakeRepo{origin: "https://github.com/octo/repo.git", worktrees: map[string]string{
@@ -550,6 +585,9 @@ func TestCleanTempRemovesOldWorktree(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Path != worktreeOld {
 		t.Fatalf("expected only old worktree in results, got %v", results)
+	}
+	if results[0].Action != CleanActionRemoved {
+		t.Fatalf("expected removed action, got %s", results[0].Action)
 	}
 	if _, err := os.Stat(worktreeOld); !os.IsNotExist(err) {
 		t.Fatalf("expected old worktree to be removed")
@@ -575,9 +613,7 @@ func TestCleanTempRemovesBareRepoWhenAllWorktreesGone(t *testing.T) {
 	}
 
 	oldTime := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(worktreeOld, oldTime, oldTime); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
+	setTempWorktreeMarkerTime(t, tempDir, worktreeOld, oldTime)
 
 	fake := newFakeGit()
 	fake.repos[bareDir] = &fakeRepo{origin: "https://github.com/octo/repo.git", worktrees: map[string]string{
@@ -650,9 +686,8 @@ func TestCleanTempDryRun(t *testing.T) {
 	}
 
 	oldTime := time.Now().Add(-48 * time.Hour)
-	if err := os.Chtimes(worktreeOld, oldTime, oldTime); err != nil {
-		t.Fatalf("chtimes: %v", err)
-	}
+	setTempWorktreeMarkerTime(t, tempDir, worktreeOld, oldTime)
+	setTempWorktreeMarkerTime(t, tempDir, worktreeNew, time.Now())
 
 	fake := newFakeGit()
 	fake.repos[bareDir] = &fakeRepo{origin: "https://github.com/octo/repo.git", worktrees: map[string]string{
@@ -667,6 +702,155 @@ func TestCleanTempDryRun(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].Path != worktreeOld {
 		t.Fatalf("expected only old worktree to be listed")
+	}
+	if results[0].Action != CleanActionWouldRemove {
+		t.Fatalf("expected would_remove action, got %s", results[0].Action)
+	}
+}
+
+func TestCleanTempSkipsDirtyWorktree(t *testing.T) {
+	tempDir := t.TempDir()
+	bareDir := filepath.Join(tempDir, "octo-repo.git")
+	worktreePath := filepath.Join(tempDir, "octo-repo-pr-1-dirty")
+
+	for _, dir := range []string{bareDir, worktreePath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	setTempWorktreeMarkerTime(t, tempDir, worktreePath, time.Now().Add(-48*time.Hour))
+
+	fake := newFakeGit()
+	fake.dirtyWorktrees[worktreePath] = true
+	fake.repos[bareDir] = &fakeRepo{origin: "https://github.com/octo/repo.git", remotes: map[string]string{"origin": "https://github.com/octo/repo.git"}, worktrees: map[string]string{
+		"pr/1/dirty": worktreePath,
+	}}
+
+	resolver := NewResolver(fake, ResolverOptions{})
+	results, err := resolver.CleanTemp(context.Background(), tempDir, 24*time.Hour, false, false)
+	if err != nil {
+		t.Fatalf("clean temp: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected one result, got %d", len(results))
+	}
+	if results[0].Action != CleanActionSkipped {
+		t.Fatalf("expected skipped action, got %s", results[0].Action)
+	}
+	if !strings.Contains(results[0].Reason, "uncommitted changes") {
+		t.Fatalf("unexpected skip reason: %s", results[0].Reason)
+	}
+	if _, err := os.Stat(worktreePath); err != nil {
+		t.Fatalf("expected dirty worktree to remain: %v", err)
+	}
+}
+
+func TestCleanTempPrunesMissingWorktreeMetadata(t *testing.T) {
+	tempDir := t.TempDir()
+	bareDir := filepath.Join(tempDir, "octo-repo.git")
+	missingPath := filepath.Join(tempDir, "octo-repo-pr-1-missing")
+
+	if err := os.MkdirAll(bareDir, 0o755); err != nil {
+		t.Fatalf("mkdir bare: %v", err)
+	}
+
+	fake := newFakeGit()
+	fake.repos[bareDir] = &fakeRepo{
+		origin:    "https://github.com/octo/repo.git",
+		remotes:   map[string]string{"origin": "https://github.com/octo/repo.git"},
+		worktrees: map[string]string{"pr/1/missing": missingPath},
+	}
+
+	resolver := NewResolver(fake, ResolverOptions{})
+	results, err := resolver.CleanTemp(context.Background(), tempDir, 24*time.Hour, false, false)
+	if err != nil {
+		t.Fatalf("clean temp: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected one result, got %d", len(results))
+	}
+	if results[0].Action != CleanActionPruned {
+		t.Fatalf("expected pruned action, got %s", results[0].Action)
+	}
+	if len(fake.prunes) != 1 || fake.prunes[0] != bareDir {
+		t.Fatalf("expected worktree prune for %s, got %v", bareDir, fake.prunes)
+	}
+	if _, err := os.Stat(bareDir); !os.IsNotExist(err) {
+		t.Fatalf("expected bare repo to be removed after pruning the last stale entry")
+	}
+}
+
+func TestCleanTempUsesMarkerInsteadOfDirectoryModTime(t *testing.T) {
+	tempDir := t.TempDir()
+	bareDir := filepath.Join(tempDir, "octo-repo.git")
+	worktreePath := filepath.Join(tempDir, "octo-repo-pr-1-old-dir")
+
+	for _, dir := range []string{bareDir, worktreePath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(worktreePath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes worktree: %v", err)
+	}
+	setTempWorktreeMarkerTime(t, tempDir, worktreePath, time.Now())
+
+	fake := newFakeGit()
+	fake.repos[bareDir] = &fakeRepo{
+		origin:    "https://github.com/octo/repo.git",
+		remotes:   map[string]string{"origin": "https://github.com/octo/repo.git"},
+		worktrees: map[string]string{"pr/1/marker": worktreePath},
+	}
+
+	resolver := NewResolver(fake, ResolverOptions{})
+	results, err := resolver.CleanTemp(context.Background(), tempDir, 24*time.Hour, false, false)
+	if err != nil {
+		t.Fatalf("clean temp: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("expected no cleanup when marker is recent, got %v", results)
+	}
+	if _, err := os.Stat(worktreePath); err != nil {
+		t.Fatalf("expected worktree to remain: %v", err)
+	}
+}
+
+func TestCleanTempFallsBackToDirectoryModTimeWhenMarkerMissing(t *testing.T) {
+	tempDir := t.TempDir()
+	bareDir := filepath.Join(tempDir, "octo-repo.git")
+	worktreePath := filepath.Join(tempDir, "octo-repo-pr-1-legacy")
+
+	for _, dir := range []string{bareDir, worktreePath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(worktreePath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes worktree: %v", err)
+	}
+
+	fake := newFakeGit()
+	fake.repos[bareDir] = &fakeRepo{
+		origin:    "https://github.com/octo/repo.git",
+		remotes:   map[string]string{"origin": "https://github.com/octo/repo.git"},
+		worktrees: map[string]string{"pr/1/legacy": worktreePath},
+	}
+
+	resolver := NewResolver(fake, ResolverOptions{})
+	results, err := resolver.CleanTemp(context.Background(), tempDir, 24*time.Hour, false, false)
+	if err != nil {
+		t.Fatalf("clean temp: %v", err)
+	}
+	if len(results) != 1 || results[0].Action != CleanActionRemoved {
+		t.Fatalf("expected legacy worktree removal via mtime fallback, got %v", results)
+	}
+	if _, err := os.Stat(worktreePath); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy worktree to be removed")
 	}
 }
 
@@ -810,6 +994,12 @@ func TestResolveTempSameRepo(t *testing.T) {
 	if fake.upstreams[0].upstream != "origin/feature" {
 		t.Fatalf("expected upstream origin/feature, got %s", fake.upstreams[0].upstream)
 	}
+	if _, err := os.Stat(tempWorktreeMarkerPath(tempDir, expectedWorktree)); err != nil {
+		t.Fatalf("expected temp usage marker to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(expectedWorktree, ".prt-last-used")); !os.IsNotExist(err) {
+		t.Fatalf("expected no marker file inside the worktree")
+	}
 }
 
 func TestResolveTempCrossRepo(t *testing.T) {
@@ -910,6 +1100,9 @@ func TestResolveTempReusesExistingWorktree(t *testing.T) {
 	}
 	if fake.upstreams[0].upstream != "origin/feature" {
 		t.Fatalf("expected upstream origin/feature, got %s", fake.upstreams[0].upstream)
+	}
+	if _, err := os.Stat(tempWorktreeMarkerPath(tempDir, worktreePath)); err != nil {
+		t.Fatalf("expected temp usage marker to exist: %v", err)
 	}
 }
 

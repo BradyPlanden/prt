@@ -64,10 +64,21 @@ func runClean(cmd *cobra.Command, rootOpts *rootOptions, opts *cleanOptions) err
 	}
 
 	for _, result := range results {
-		if opts.DryRun {
+		switch result.Action {
+		case workspace.CleanActionWouldRemove:
 			fmt.Fprintf(cmd.OutOrStdout(), "Would remove %s\n", result.Path)
-		} else {
+		case workspace.CleanActionRemoved:
 			fmt.Fprintf(cmd.OutOrStdout(), "Removed %s\n", result.Path)
+		case workspace.CleanActionWouldPrune:
+			fmt.Fprintf(cmd.OutOrStdout(), "Would prune missing worktree metadata for %s\n", result.Path)
+		case workspace.CleanActionPruned:
+			fmt.Fprintf(cmd.OutOrStdout(), "Pruned missing worktree metadata for %s\n", result.Path)
+		case workspace.CleanActionSkipped:
+			if result.Reason == "" {
+				fmt.Fprintf(cmd.OutOrStdout(), "Skipped %s\n", result.Path)
+				continue
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Skipped %s (%s)\n", result.Path, result.Reason)
 		}
 	}
 

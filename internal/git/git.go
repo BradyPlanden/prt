@@ -243,6 +243,24 @@ func (c *Client) ConfigSetWorktree(ctx context.Context, repoDir string, key stri
 	return nil
 }
 
+// IsWorktreeDirty reports whether repoDir has uncommitted changes.
+func (c *Client) IsWorktreeDirty(ctx context.Context, repoDir string) (bool, error) {
+	output, err := c.runner.Run(ctx, repoDir, "git", "status", "--porcelain", "--untracked-files=all")
+	if err != nil {
+		return false, fmt.Errorf("git status --porcelain failed: %w", err)
+	}
+	return strings.TrimSpace(output) != "", nil
+}
+
+// WorktreePrune removes stale worktree administrative entries from repoDir.
+func (c *Client) WorktreePrune(ctx context.Context, repoDir string) error {
+	_, err := c.runner.Run(ctx, repoDir, "git", "worktree", "prune")
+	if err != nil {
+		return fmt.Errorf("git worktree prune failed: %w", err)
+	}
+	return nil
+}
+
 // WorktreeAddBranch adds a worktree and creates or resets branch from startPoint.
 func (c *Client) WorktreeAddBranch(ctx context.Context, repoDir string, worktreePath string, branch string, startPoint string, force bool) error {
 	flag := "-b"

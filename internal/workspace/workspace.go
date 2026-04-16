@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/url"
@@ -30,8 +31,21 @@ type Result struct {
 
 // CleanResult describes one removed or removable worktree path.
 type CleanResult struct {
-	Path string
+	Path   string
+	Action CleanAction
+	Reason string
 }
+
+// CleanAction describes the outcome for a temp worktree cleanup candidate.
+type CleanAction string
+
+const (
+	CleanActionRemoved     CleanAction = "removed"
+	CleanActionWouldRemove CleanAction = "would_remove"
+	CleanActionPruned      CleanAction = "pruned"
+	CleanActionWouldPrune  CleanAction = "would_prune"
+	CleanActionSkipped     CleanAction = "skipped"
+)
 
 // Resolver maps PR metadata to persistent or temporary worktrees.
 type Resolver struct {
@@ -69,6 +83,8 @@ type GitClient interface {
 	ConfigSet(ctx context.Context, repoDir string, key string, value string) error
 	ConfigSetWorktree(ctx context.Context, repoDir string, key string, value string) error
 	WorktreeAddBranch(ctx context.Context, repoDir string, worktreePath string, branch string, startPoint string, force bool) error
+	IsWorktreeDirty(ctx context.Context, repoDir string) (bool, error)
+	WorktreePrune(ctx context.Context, repoDir string) error
 }
 
 // NewResolver constructs a Resolver with the provided git client.
@@ -111,7 +127,15 @@ func (r *Resolver) resolveTemp(ctx context.Context, cfg config.Config, pr github
 	}
 
 	worktreePath := filepath.Join(cfg.TempDir, slug+"-"+worktreeName(pr))
-	return r.resolveWorktree(ctx, bareDir, worktreePath, pr, true)
+	result, err := r.resolveWorktree(ctx, bareDir, worktreePath, pr, true)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := touchTempWorktreeMarker(cfg.TempDir, result.Path); err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("could not update temp worktree usage marker: %v", err))
+		r.logWarnings([]string{fmt.Sprintf("could not update temp worktree usage marker: %v", err)})
+	}
+	return result, nil
 }
 
 // resolveWorktree handles the fetch/check/create cycle shared by persistent
@@ -256,28 +280,93 @@ func (r *Resolver) cleanBareRepo(ctx context.Context, bareDir string, ttl time.D
 		return err
 	}
 
+	tempDir := filepath.Dir(bareDir)
 	now := time.Now()
 	removed := make(map[string]struct{})
+	prunedMissing := false
 	for _, wt := range worktrees {
 		if wt.Path == bareDir {
 			continue
 		}
+
+		_, err := os.Stat(wt.Path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				action := CleanActionPruned
+				if dryRun {
+					action = CleanActionWouldPrune
+				}
+				*results = append(*results, CleanResult{
+					Path:   wt.Path,
+					Action: action,
+					Reason: "worktree path is missing",
+				})
+				removed[wt.Path] = struct{}{}
+				prunedMissing = true
+				if !dryRun {
+					if err := removeTempWorktreeMarker(tempDir, wt.Path); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			return fmt.Errorf("stat worktree: %w", err)
+		}
+
 		shouldRemove := removeAll
 		if !shouldRemove {
-			info, err := os.Stat(wt.Path)
-			if err == nil {
-				shouldRemove = now.Sub(info.ModTime()) >= ttl
+			lastUsed, ok, err := tempWorktreeLastUsedAt(tempDir, wt.Path)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				info, err := os.Stat(wt.Path)
+				if err != nil {
+					return fmt.Errorf("stat worktree for legacy cleanup fallback: %w", err)
+				}
+				lastUsed = info.ModTime()
+			}
+			shouldRemove = now.Sub(lastUsed) >= ttl
+		}
+
+		if !shouldRemove {
+			continue
+		}
+
+		if !removeAll {
+			dirty, err := r.git.IsWorktreeDirty(ctx, wt.Path)
+			if err != nil {
+				return err
+			}
+			if dirty {
+				*results = append(*results, CleanResult{
+					Path:   wt.Path,
+					Action: CleanActionSkipped,
+					Reason: "worktree has uncommitted changes",
+				})
+				continue
 			}
 		}
 
-		if shouldRemove {
-			*results = append(*results, CleanResult{Path: wt.Path})
-			removed[wt.Path] = struct{}{}
-			if !dryRun {
-				if err := r.git.WorktreeRemove(ctx, bareDir, wt.Path, true); err != nil {
-					return err
-				}
+		action := CleanActionRemoved
+		if dryRun {
+			action = CleanActionWouldRemove
+		}
+		*results = append(*results, CleanResult{Path: wt.Path, Action: action})
+		removed[wt.Path] = struct{}{}
+		if !dryRun {
+			if err := r.git.WorktreeRemove(ctx, bareDir, wt.Path, true); err != nil {
+				return err
 			}
+			if err := removeTempWorktreeMarker(tempDir, wt.Path); err != nil {
+				return err
+			}
+		}
+	}
+
+	if prunedMissing && !dryRun {
+		if err := r.git.WorktreePrune(ctx, bareDir); err != nil {
+			return err
 		}
 	}
 
@@ -516,4 +605,48 @@ func repoPathFromRemote(remote string) string {
 		return strings.TrimPrefix(remote[idx:], "/")
 	}
 	return ""
+}
+
+func tempWorktreeMarkerPath(tempDir string, worktreePath string) string {
+	sum := sha256.Sum256([]byte(worktreePath))
+	name := fmt.Sprintf("%s-%x.last-used", filepath.Base(worktreePath), sum[:8])
+	return filepath.Join(tempDir, ".prt-meta", "last-used", name)
+}
+
+func touchTempWorktreeMarker(tempDir string, worktreePath string) error {
+	now := time.Now()
+	path := tempWorktreeMarkerPath(tempDir, worktreePath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create usage marker directory: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return fmt.Errorf("open usage marker: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close usage marker: %w", err)
+	}
+	if err := os.Chtimes(path, now, now); err != nil {
+		return fmt.Errorf("touch usage marker: %w", err)
+	}
+	return nil
+}
+
+func tempWorktreeLastUsedAt(tempDir string, worktreePath string) (time.Time, bool, error) {
+	info, err := os.Stat(tempWorktreeMarkerPath(tempDir, worktreePath))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, fmt.Errorf("stat usage marker: %w", err)
+	}
+	return info.ModTime(), true, nil
+}
+
+func removeTempWorktreeMarker(tempDir string, worktreePath string) error {
+	err := os.Remove(tempWorktreeMarkerPath(tempDir, worktreePath))
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return fmt.Errorf("remove usage marker: %w", err)
 }
