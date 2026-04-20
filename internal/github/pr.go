@@ -155,14 +155,14 @@ func (c *Client) FetchPRMetadata(ctx context.Context, prURL string) (PRMetadata,
 	}
 
 	return PRMetadata{
-		Number:   payload.Number,
-		Title:    payload.Title,
-		State:    payload.State,
-		URL:      payload.URL,
-		HeadRef:  payload.HeadRefName,
-		BaseRef:  payload.BaseRefName,
-		BaseRepo: baseRepo,
-		HeadRepo: headRepo,
+		Number:          payload.Number,
+		Title:           payload.Title,
+		State:           payload.State,
+		URL:             payload.URL,
+		HeadRef:         payload.HeadRefName,
+		BaseRef:         payload.BaseRefName,
+		BaseRepo:        baseRepo,
+		HeadRepo:        headRepo,
 		HeadRepoMissing: headRepoMissing,
 	}, nil
 }

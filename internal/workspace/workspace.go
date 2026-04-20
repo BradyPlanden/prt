@@ -40,11 +40,16 @@ type CleanResult struct {
 type CleanAction string
 
 const (
-	CleanActionRemoved     CleanAction = "removed"
+	// CleanActionRemoved means a temp worktree was removed.
+	CleanActionRemoved CleanAction = "removed"
+	// CleanActionWouldRemove means a temp worktree would be removed in a dry run.
 	CleanActionWouldRemove CleanAction = "would_remove"
-	CleanActionPruned      CleanAction = "pruned"
-	CleanActionWouldPrune  CleanAction = "would_prune"
-	CleanActionSkipped     CleanAction = "skipped"
+	// CleanActionPruned means a stale temp worktree entry was pruned.
+	CleanActionPruned CleanAction = "pruned"
+	// CleanActionWouldPrune means a stale temp worktree entry would be pruned in a dry run.
+	CleanActionWouldPrune CleanAction = "would_prune"
+	// CleanActionSkipped means a cleanup candidate was left untouched.
+	CleanActionSkipped CleanAction = "skipped"
 )
 
 // Resolver maps PR metadata to persistent or temporary worktrees.
@@ -500,17 +505,19 @@ func ensureBareRepo(ctx context.Context, client GitClient, bareDir string, clone
 
 func fetchPR(ctx context.Context, client GitClient, repoDir string, pr github.PRMetadata) (prCheckoutTarget, error) {
 	target := primaryCheckoutTarget(pr)
-	if err := client.Fetch(ctx, repoDir, target.Remote, target.Refspec); err == nil {
+	err := client.Fetch(ctx, repoDir, target.Remote, target.Refspec)
+	if err == nil {
 		return target, nil
-	} else if !shouldFallbackToPullRef(pr, target) {
-		return target, err
-	} else {
-		fallback := pullRefCheckoutTarget(pr)
-		if fallbackErr := client.Fetch(ctx, repoDir, fallback.Remote, fallback.Refspec); fallbackErr != nil {
-			return target, fmt.Errorf("direct fetch failed: %w; fallback pull ref fetch failed: %v", err, fallbackErr)
-		}
-		return fallback, nil
 	}
+	if !shouldFallbackToPullRef(pr, target) {
+		return target, err
+	}
+
+	fallback := pullRefCheckoutTarget(pr)
+	if fallbackErr := client.Fetch(ctx, repoDir, fallback.Remote, fallback.Refspec); fallbackErr != nil {
+		return target, fmt.Errorf("direct fetch failed: %w; fallback pull ref fetch failed: %v", err, fallbackErr)
+	}
+	return fallback, nil
 }
 
 func branchRefForPR(pr github.PRMetadata) string {
@@ -608,11 +615,11 @@ func repoPathFromRemote(remote string) string {
 }
 
 type prCheckoutTarget struct {
-	Remote    string
-	Refspec   string
+	Remote     string
+	Refspec    string
 	StartPoint string
-	Upstream  string
-	IsPullRef bool
+	Upstream   string
+	IsPullRef  bool
 }
 
 func primaryCheckoutTarget(pr github.PRMetadata) prCheckoutTarget {
